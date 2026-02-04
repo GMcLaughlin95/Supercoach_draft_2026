@@ -16,73 +16,77 @@ def load_data():
 df = load_data()
 
 if not df.empty:
-    # --- SIDEBAR SETTINGS ---
-    with st.sidebar:
-        st.header("⚙️ Draft Settings")
-        
-        # 1. Custom Number of Teams
-        num_teams = st.number_input("Number of Teams in League", min_value=2, max_value=20, value=10)
-        
-        # 2. Custom Draft Position
-        my_pos = st.number_input("Your Draft Position (Pick #)", min_value=1, max_value=num_teams, value=5)
-        
-        st.markdown("---")
-        st.subheader("📋 Roster Requirements")
-        # 3. Custom Team Configuration
-        req_def = st.number_input("Defenders (DEF) required", value=4)
-        req_mid = st.number_input("Midfielders (MID) required", value=6)
-        req_ruc = st.number_input("Rucks (RUC) required", value=1)
-        req_fwd = st.number_input("Forwards (FWD) required", value=4)
-        
-        st.markdown("---")
-        st.header("Drafted Players")
-        if 'drafted' not in st.session_state: st.session_state.drafted = []
+    # Initialize session state
+    if 'drafted' not in st.session_state: st.session_state.drafted = []
+    if 'my_team_names' not in st.session_state: st.session_state.my_team_names = []
 
-        new_pick = st.selectbox("Search & Add Player:", [""] + sorted(list(df['full_name'].unique())))
+    # --- SIDEBAR ---
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        num_teams = st.number_input("Teams", min_value=2, max_value=20, value=10)
+        my_pos = st.number_input("Your Pick #", min_value=1, max_value=num_teams, value=5)
+        
+        st.markdown("---")
+        req_def = st.number_input("DEF Needs", value=4)
+        req_mid = st.number_input("MID Needs", value=6)
+        req_ruc = st.number_input("RUC Needs", value=1)
+        req_fwd = st.number_input("FWD Needs", value=4)
+        
+        st.markdown("---")
+        current_pick = len(st.session_state.drafted) + 1
+        round_num = ((current_pick - 1) // num_teams) + 1
+        if round_num % 2 != 0: target_pick = (round_num - 1) * num_teams + my_pos
+        else: target_pick = (round_num * num_teams) - my_pos + 1
+        is_my_turn = (current_pick == target_pick)
+
+        # IMPORTANT: This list filters out drafted players instantly
+        available_list = sorted(df[~df['full_name'].isin(st.session_state.drafted)]['full_name'].unique())
+        new_pick = st.selectbox("Draft Player:", [""] + available_list)
+        
         if st.button("Confirm Pick") and new_pick != "":
-            if new_pick not in st.session_state.drafted:
-                st.session_state.drafted.append(new_pick)
+            st.session_state.drafted.append(new_pick)
+            if is_my_turn: st.session_state.my_team_names.append(new_pick)
             st.rerun()
         
-        if st.button("Undo Last Pick"):
+        if st.button("Undo Last"):
             if st.session_state.drafted:
-                st.session_state.drafted.pop()
+                removed = st.session_state.drafted.pop()
+                if removed in st.session_state.my_team_names: st.session_state.my_team_names.remove(removed)
                 st.rerun()
 
-    # --- LOGIC ---
-    current_pick = len(st.session_state.drafted) + 1
-    round_num = ((current_pick - 1) // num_teams) + 1
-    
-    # Calculate when your next turn is based on snake draft logic
-    if round_num % 2 != 0: target_pick = (round_num - 1) * num_teams + my_pos
-    else: target_pick = (round_num * num_teams) - my_pos + 1
-    is_my_turn = (current_pick == target_pick)
-
-    remaining = df[~df['full_name'].isin(st.session_state.drafted)].copy()
-
-    # Dynamic VORP: Automatically adjusts based on team numbers and roster requirements
-    def get_replacement_val(pos, count):
-        pos_df = df[df['positions'].str.contains(pos, na=False)].sort_values('Avg', ascending=False)
-        rank = count * num_teams # e.g. 10 teams * 4 DEF = 40th ranked DEF
-        return pos_df.iloc[rank-1]['Avg'] if len(pos_df) >= rank else pos_df.iloc[-1]['Avg']
-
-    REPLACEMENT = {
-        'DEF': get_replacement_val('DEF', req_def),
-        'MID': get_replacement_val('MID', req_mid),
-        'RUC': get_replacement_val('RUC', req_ruc),
-        'FWD': get_replacement_val('FWD', req_fwd)
-    }
-    remaining['VORP'] = remaining.apply(lambda x: x['Avg'] - REPLACEMENT.get(x['positions'].split('/')[0], 90), axis=1)
-
-    # --- DISPLAY ---
+    # --- MAIN VIEW ---
     st.title("🚀 Supercoach Draft Optimizer")
-    c1, c2 = st.columns(2)
-    c1.metric("Current Pick", current_pick)
-    if is_my_turn: c2.success("🎯 IT'S YOUR TURN!")
-    else: c2.info(f"Your next pick is #{target_pick}")
+    
+    col1, col2 = st.columns(2)
+    col1.metric("Pick #", current_pick)
+    if is_my_turn: col2.success("🎯 YOUR TURN!")
+    else: col2.info(f"Next turn: #{target_pick}")
 
-    st.subheader("Top Available Players (Ranked by Positional Value)")
-    st.dataframe(remaining[['full_name', 'positions', 'Avg', 'VORP']]
-                 .sort_values('VORP', ascending=False).head(25), use_container_width=True)
-else:
-    st.error("Please ensure 'supercoach_data.csv' is uploaded to your GitHub repository.")
+    # Available Players Table
+    st.subheader("📋 Best Available")
+    remaining = df[~df['full_name'].isin(st.session_state.drafted)].copy()
+    
+    # Simple VORP calc for display
+    remaining['VORP'] = remaining.apply(lambda x: round(x['Avg'] - 98, 1), axis=1) # Baseline 98
+    st.dataframe(remaining[['full_name', 'positions', 'Avg', 'VORP']].sort_values('VORP', ascending=False).head(15), use_container_width=True)
+
+    # --- INFOGRAPHIC SECTION ---
+    st.markdown("---")
+    st.subheader("🏟️ My Team Sheet")
+    
+    my_team_df = df[df['full_name'].isin(st.session_state.my_team_names)]
+    
+    # Layout 4 columns for positions
+    d_col, m_col, r_col, f_col = st.columns(4)
+    layout = [('DEF', d_col, "🟦"), ('MID', m_col, "🟩"), ('RUC', r_col, "🟧"), ('FWD', f_col, "🟥")]
+    
+    for pos, col, emoji in layout:
+        with col:
+            st.markdown(f"### {emoji} {pos}")
+            # Filter players by position
+            p_list = my_team_df[my_team_df['positions'].str.contains(pos)]
+            if not p_list.empty:
+                for _, p in p_list.iterrows():
+                    st.success(f"**{p['full_name']}**\n\nAvg: {p['Avg']}")
+            else:
+                st.write("*Empty*")
