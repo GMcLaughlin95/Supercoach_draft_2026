@@ -145,10 +145,10 @@ if st.button("CONFIRM PICK", type="primary", use_container_width=True, disabled=
         "player": selected, 
         "assigned_pos": assigned_pos  # <--- This is the critical new data point
     })
-            p_num = len(st.session_state.draft_history) + 1
-            turn = get_current_turn(p_num, num_teams)
-            if turn == my_slot: st.session_state.my_team.append(selected)
-            save_state(); st.rerun()
+        p_num = len(st.session_state.draft_history) + 1
+        turn = get_current_turn(p_num, num_teams)
+        if turn == my_slot: st.session_state.my_team.append(selected)
+        save_state(); st.rerun()
 
 # --- 4. CALC VORP ---
 if not df.empty:
@@ -219,3 +219,4 @@ with t4:
 
 
     
+
