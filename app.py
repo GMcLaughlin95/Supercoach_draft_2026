@@ -103,6 +103,52 @@ if not df.empty:
         avail_df = df[~df['full_name'].isin(taken_names)].sort_values('VORP', ascending=False)
         st.dataframe(avail_df[['full_name', 'positions', 'VORP', 'Power_Rating', 'Bye']].head(50), use_container_width=True, hide_index=True)
 
+    with t2:
+    st.header("🛡️ My Squad Infographic")
+    
+    # Filter only your players from the master dataframe
+    my_df = df[df['full_name'].isin(st.session_state.my_team)]
+    
+    if not my_df.empty:
+        # Create 4 columns for the 4 positional groups
+        col1, col2, col3, col4 = st.columns(4)
+        
+        # Position mapping to handle dual-position players (looking at primary)
+        positions_to_show = {
+            "DEF": col1,
+            "MID": col2,
+            "RUC": col3,
+            "FWD": col4
+        }
+        
+        for pos, col in positions_to_show.items():
+            with col:
+                # Filter players belonging to this category
+                p_list = my_df[my_df['positions'].str.contains(pos)]
+                count = len(p_list)
+                req = reqs.get(pos, 0)
+                
+                # Header with progress color
+                header_color = "green" if count >= req else "orange"
+                st.markdown(f"### :{header_color}[{pos}] <small>({count}/{req})</small>", unsafe_allow_html=True)
+                
+                # Render each player as a "Card"
+                for p in p_list.itertuples():
+                    with st.container(border=True):
+                        st.markdown(f"**{p.full_name}**")
+                        st.caption(f"Avg: {p.Avg} | Bye: {p.Bye}")
+                        
+                        # Add a tiny health status
+                        health_icon = "🟢" if p.Health == "✅ Fit" else "🔴"
+                        st.markdown(f"{health_icon} <small>{p.Health}</small>", unsafe_allow_html=True)
+        
+        st.divider()
+        st.subheader("📅 Bye Round Exposure")
+        st.bar_chart(my_df['Bye'].value_counts().sort_index())
+        
+    else:
+        st.info("Your roster is currently empty. Start drafting players to see your infographic!")
+
     with t3:
         st.subheader("📊 League Power Rankings")
         if st.session_state.draft_history:
@@ -146,3 +192,4 @@ if not df.empty:
                 st.write(f"**{pt}**")
                 for p in t_df[t_df['positions'].str.contains(pt)].itertuples():
                     st.info(f"{p.full_name}")
+
