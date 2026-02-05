@@ -196,7 +196,7 @@ with t1:
     st.subheader("🎯 Big Board")
     if not avail_df.empty:
         cols_to_show = [c for c in ['full_name', 'positions', 'VORP', 'Power_Rating', 'Health'] if c in avail_df.columns]
-        st.dataframe(avail_df[cols_to_show].sort_values('VORP', ascending=False).head(40), use_container_width=True, hide_index=True)
+        st.dataframe(avail_df[cols_to_show].sort_values('VORP', ascending=False), use_container_width=True, hide_index=True)
 
 with t2:
     st.subheader("My Squad")
@@ -229,6 +229,7 @@ with t4:
             st.write(f"**{pos}**")
             for p in [x for x in t_picks if x['assigned_pos'] == pos]:
                 st.success(p['player'])
+
 
 
 
