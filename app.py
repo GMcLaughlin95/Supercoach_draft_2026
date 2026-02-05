@@ -39,11 +39,40 @@ def load_data():
     try:
         df = pd.read_csv('supercoach_data.csv')
         df.columns = [c.strip() for c in df.columns]
+        
         if 'full_name' not in df.columns:
             df['full_name'] = (df['first_name'].astype(str) + ' ' + df['last_name'].astype(str)).str.strip()
-        df['Avg'] = pd.to_numeric(df.get('Avg', 0), errors='coerce').fillna(0)
-        df['Last3_Avg'] = pd.to_numeric(df.get('Last3_Avg', 0), errors='coerce').fillna(0)
-        df['Power_Rating'] = (df['Avg'] * 0.6 + df['Last3_Avg'] * 0.4).round(1)
+        
+        # --- NEW: CONVERT ALL METRICS FOR POWER RATING ---
+        cols_to_fix = ['Avg', 'Last3_Avg', 'gamesPlayed', 'KickInAvg', 'CbaAvg', 'Tog%']
+        for col in cols_to_fix:
+            df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
+        
+        # --- NEW ADVANCED POWER RATING CALCULATION ---
+        def calculate_custom_power(row):
+            # 1. Base Score (50% Season Avg, 30% Recent Form)
+            score = (row['Avg'] * 0.5) + (row['Last3_Avg'] * 0.3)
+            
+            # 2. Reliability Penalty (Penalize if played < 15 games)
+            if row['gamesPlayed'] > 0 and row['gamesPlayed'] < 15:
+                score -= 5.0
+            
+            # 3. Role Bonuses
+            if 'DEF' in row['positions']:
+                score += (row['KickInAvg'] * 0.5)
+            
+            if 'MID' in row['positions'] and row['CbaAvg'] > 50:
+                score += 3.0
+            
+            # 4. Efficiency Multiplier (Time on Ground)
+            if row['Tog%'] > 0 and row['Tog%'] < 75:
+                score += 2.0
+                
+            return round(score, 1)
+
+        df['Power_Rating'] = df.apply(calculate_custom_power, axis=1)
+        
+        # Initialize display columns
         df['VORP'] = 0.0
         df['Health'] = "✅ Fit"
         return df
@@ -65,7 +94,6 @@ def get_current_turn(curr_pick, total_teams):
     return (curr_pick - 1) % total_teams + 1 if rnd % 2 != 0 else total_teams - ((curr_pick - 1) % total_teams)
 
 def check_roster_limit(chosen_pos, team_id, user_inputs, history_list):
-    """Validates against the specific slot chosen by the user."""
     team_picks = [d for d in history_list if d['team'] == team_id]
     current_count = sum(1 for p in team_picks if p.get('assigned_pos') == chosen_pos)
     max_limit = user_inputs.get(chosen_pos, 0) + 2
@@ -130,7 +158,6 @@ with st.sidebar:
         player_row = df[df['full_name'] == selected].iloc[0]
         possible_pos = player_row['positions'].split('/')
         
-        # DUAL POSITION SELECTION PROMPT
         if len(possible_pos) > 1:
             assigned_pos = st.radio(f"Assign {selected} to:", possible_pos, horizontal=True)
         else:
@@ -143,7 +170,7 @@ with st.sidebar:
             if assigned_pos == 'RUC' and ruc_count == 2:
                 st.warning(f"⚠️ Team {turn} drafting 3rd Ruckman. Final Limit.")
         else:
-            st.error(f"❌ Team {turn} is full at {assigned_pos} (Max {user_inputs[assigned_pos]+2})")
+            st.error(f"❌ Team {turn} is full at {assigned_pos}")
 
     if st.button("CONFIRM PICK", type="primary", use_container_width=True, disabled=not can_confirm):
         p_num = len(st.session_state.draft_history) + 1
@@ -158,11 +185,7 @@ with st.sidebar:
 if not df.empty:
     avail_df = df[~df['full_name'].isin(taken_names)].copy()
     if not avail_df.empty:
-        baselines = {}
-        for pos in ['DEF', 'MID', 'RUC', 'FWD']:
-            pool = avail_df[avail_df['positions'].str.contains(pos, na=False)].sort_values('Power_Rating', ascending=False)
-            idx = min(len(pool)-1, 12)
-            baselines[pos] = pool.iloc[idx]['Power_Rating'] if not pool.empty else 80
+        baselines = {pos: (avail_df[avail_df['positions'].str.contains(pos, na=False)].sort_values('Power_Rating', ascending=False).iloc[min(len(avail_df[avail_df['positions'].str.contains(pos, na=False)])-1, 12)]['Power_Rating'] if not avail_df[avail_df['positions'].str.contains(pos, na=False)].empty else 80) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
         avail_df['VORP'] = avail_df.apply(lambda x: round(x['Power_Rating'] - baselines.get(x['positions'].split('/')[0], 80), 1), axis=1)
 else: avail_df = pd.DataFrame()
 
@@ -190,15 +213,9 @@ with t3:
 
 with t4:
     st.subheader("📊 League Power Rankings")
-    team_stats = []
-    for i in range(1, num_teams + 1):
-        t_names = [d['player'] for d in st.session_state.draft_history if d['team'] == i]
-        total_p = df[df['full_name'].isin(t_names)]['Power_Rating'].sum()
-        team_stats.append({"Team": f"Team {i}", "Power": total_p})
-    
+    team_stats = [{"Team": f"Team {i}", "Power": df[df['full_name'].isin([d['player'] for d in st.session_state.draft_history if d['team'] == i])]['Power_Rating'].sum()} for i in range(1, num_teams+1)]
     if team_stats:
-        chart_df = pd.DataFrame(team_stats)
-        st.bar_chart(chart_df.set_index("Team"), color="#2e7d32")
+        st.bar_chart(pd.DataFrame(team_stats).set_index("Team"), color="#2e7d32")
     
     st.divider()
     st.subheader("🏢 Opponent Rosters")
@@ -210,6 +227,5 @@ with t4:
     for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
         with cols[i]:
             st.write(f"**{pos}**")
-            # Filters history to find players specifically assigned to this slot
             for p in [x for x in t_picks if x['assigned_pos'] == pos]:
                 st.success(p['player'])
