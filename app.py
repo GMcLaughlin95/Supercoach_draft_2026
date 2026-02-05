@@ -144,7 +144,12 @@ if not df.empty:
 
     with t3:
         st.title("Pick History")
-        st.write(pd.DataFrame(st.session_state.draft_history).sort_values('pick', ascending=False))
+        if st.session_state.draft_history:
+            # Only attempt to sort if the list has data
+            history_df = pd.DataFrame(st.session_state.draft_history)
+            st.write(history_df.sort_values('pick', ascending=False))
+        else:
+            st.info("No picks have been made yet. Use the sidebar to start the draft!")
 
     with t4:
         st.title("Club Depth")
@@ -175,3 +180,4 @@ if not df.empty:
 
 else:
     st.error("Upload 'supercoach_data.csv' to begin.")
+
