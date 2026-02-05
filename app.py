@@ -32,7 +32,6 @@ def load_data():
     try:
         df = pd.read_csv('supercoach_data.csv')
         df['full_name'] = (df['first_name'] + ' ' + df['last_name']).str.strip()
-        # Advanced Weighting: 60% Avg, 40% Last 3 Form
         df['Power_Rating'] = (df['Avg'] * 0.6 + df['Last3_Avg'] * 0.4).round(1)
         return df
     except: return pd.DataFrame()
@@ -41,6 +40,14 @@ if 'draft_history' not in st.session_state: st.session_state.draft_history = []
 if 'my_team' not in st.session_state: st.session_state.my_team = []
 
 df, injuries = load_data(), get_injuries()
+
+# Helper for Turn Logic
+def get_current_turn(curr_pick, total_teams):
+    rnd = ((curr_pick - 1) // total_teams) + 1
+    if rnd % 2 != 0:
+        return (curr_pick - 1) % total_teams + 1
+    else:
+        return total_teams - ((curr_pick - 1) % total_teams)
 
 # --- 2. SIDEBAR COMMAND ---
 with st.sidebar:
@@ -59,7 +66,34 @@ with st.sidebar:
     }
     
     st.divider()
-    if st.button("🔄 Recover Draft"): load_state()
+    col_save1, col_save2 = st.columns(2)
+    if col_save1.button("💾 Save Progress"): 
+        save_state()
+        st.toast("Draft Saved!")
+    if col_save2.button("🔄 Recover Draft"): load_state()
+    
+    # --- PICK SIMULATION BUTTON ---
+    if st.button("🤖 Simulate to My Turn", use_container_width=True):
+        while True:
+            curr_p = len(st.session_state.draft_history) + 1
+            turn = get_current_turn(curr_p, num_teams)
+            
+            # Stop if it's the user's turn
+            if turn == my_slot:
+                st.toast("It's your turn!")
+                break
+                
+            # AI Logic: Pick Best Available by Power Rating
+            taken_sim = [d['player'] for d in st.session_state.draft_history]
+            avail_sim = df[~df['full_name'].isin(taken_sim)].sort_values('Power_Rating', ascending=False)
+            
+            if avail_sim.empty: break
+            
+            ai_pick = avail_sim.iloc[0]['full_name']
+            st.session_state.draft_history.append({"pick": curr_p, "team": turn, "player": ai_pick})
+        
+        save_state()
+        st.rerun()
     
     st.divider()
     taken_names = [d['player'] for d in st.session_state.draft_history]
@@ -69,8 +103,7 @@ with st.sidebar:
     if st.button("CONFIRM PICK", type="primary", use_container_width=True):
         if selected:
             p_num = len(st.session_state.draft_history) + 1
-            rnd = ((p_num - 1) // num_teams) + 1
-            turn = (p_num - 1) % num_teams + 1 if rnd % 2 != 0 else num_teams - ((p_num - 1) % num_teams)
+            turn = get_current_turn(p_num, num_teams)
             st.session_state.draft_history.append({"pick": p_num, "team": turn, "player": selected})
             if turn == my_slot: st.session_state.my_team.append(selected)
             save_state()
@@ -95,8 +128,7 @@ t1, t2, t3, t4 = st.tabs(["🎯 Board", "📋 My Team", "📈 League", "🏢 Ros
 
 with t1:
     curr_p = len(st.session_state.draft_history) + 1
-    rnd = ((curr_p - 1) // num_teams) + 1
-    turn = (curr_p - 1) % num_teams + 1 if rnd % 2 != 0 else num_teams - ((curr_p - 1) % num_teams)
+    turn = get_current_turn(curr_p, num_teams)
     
     if turn == my_slot:
         st.success("### 🚨 YOUR TURN!")
@@ -106,7 +138,6 @@ with t1:
             cols[i].metric(p['full_name'], f"VORP +{p['VORP']}", p['positions'])
     
     st.subheader("Big Board")
-    # Color scale logic for VORP
     def color_vorp(val):
         color = '#1b5e20' if val > 12 else '#2e7d32' if val > 6 else '#388e3c' if val > 0 else 'none'
         return f'background-color: {color}'
