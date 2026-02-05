@@ -41,22 +41,36 @@ if 'my_team' not in st.session_state: st.session_state.my_team = []
 
 df, injuries = load_data(), get_injuries()
 
-# Helper for Turn Logic
+# --- 2. HELPER FUNCTIONS ---
 def get_current_turn(curr_pick, total_teams):
     rnd = ((curr_pick - 1) // total_teams) + 1
-    if rnd % 2 != 0:
-        return (curr_pick - 1) % total_teams + 1
-    else:
-        return total_teams - ((curr_pick - 1) % total_teams)
+    return (curr_pick - 1) % total_teams + 1 if rnd % 2 != 0 else total_teams - ((curr_pick - 1) % total_teams)
 
-# --- 2. SIDEBAR COMMAND ---
+def check_roster_limit(player_name, team_id, roster_reqs, history_list, data_df):
+    """Returns True if the team CAN draft the player without exceeding requirements."""
+    player_data = data_df[data_df['full_name'] == player_name].iloc[0]
+    p_pos = player_data['positions']
+    
+    # Get current players for this team
+    team_p_names = [d['player'] for d in history_list if d['team'] == team_id]
+    team_df = data_df[data_df['full_name'].isin(team_p_names)]
+    
+    # Check each position tag the player has (e.g. MID/FWD)
+    for pos in ['DEF', 'MID', 'RUC', 'FWD']:
+        if pos in p_pos:
+            current_count = len(team_df[team_df['positions'].str.contains(pos)])
+            if current_count >= roster_reqs[pos]:
+                return False, pos
+    return True, None
+
+# --- 3. SIDEBAR COMMAND ---
 with st.sidebar:
     st.title("🛡️ Command Center")
     num_teams = st.number_input("Total Teams", value=10, min_value=1)
     my_slot = st.number_input("Your Slot", value=5, min_value=1, max_value=num_teams)
     
     st.divider()
-    st.write("**Roster Requirements**")
+    st.write("**Roster Limits (Max per Pos)**")
     c_req1, c_req2 = st.columns(2)
     reqs = {
         'DEF': c_req1.number_input("DEF", value=4, min_value=0),
@@ -72,25 +86,32 @@ with st.sidebar:
         st.toast("Draft Saved!")
     if col_save2.button("🔄 Recover Draft"): load_state()
     
-    # --- PICK SIMULATION BUTTON ---
+    # --- SMART AI SIMULATION ---
     if st.button("🤖 Simulate to My Turn", use_container_width=True):
         while True:
             curr_p = len(st.session_state.draft_history) + 1
             turn = get_current_turn(curr_p, num_teams)
-            
-            # Stop if it's the user's turn
             if turn == my_slot:
                 st.toast("It's your turn!")
                 break
-                
-            # AI Logic: Pick Best Available by Power Rating
+            
             taken_sim = [d['player'] for d in st.session_state.draft_history]
             avail_sim = df[~df['full_name'].isin(taken_sim)].sort_values('Power_Rating', ascending=False)
             
             if avail_sim.empty: break
             
-            ai_pick = avail_sim.iloc[0]['full_name']
-            st.session_state.draft_history.append({"pick": curr_p, "team": turn, "player": ai_pick})
+            # Find the best player that fits AI's roster limits
+            ai_choice = None
+            for _, row in avail_sim.iterrows():
+                fits, _ = check_roster_limit(row['full_name'], turn, reqs, st.session_state.draft_history, df)
+                if fits:
+                    ai_choice = row['full_name']
+                    break
+            
+            if ai_choice:
+                st.session_state.draft_history.append({"pick": curr_p, "team": turn, "player": ai_choice})
+            else:
+                break # All available players exceed limits (roster full)
         
         save_state()
         st.rerun()
@@ -100,7 +121,17 @@ with st.sidebar:
     avail_list = sorted(df[~df['full_name'].isin(taken_names)]['full_name'].tolist())
     selected = st.selectbox("Record Pick:", [""] + avail_list)
     
-    if st.button("CONFIRM PICK", type="primary", use_container_width=True):
+    # --- USER VALIDATION ---
+    can_pick = True
+    if selected:
+        curr_p = len(st.session_state.draft_history) + 1
+        turn = get_current_turn(curr_p, num_teams)
+        allowed, pos_failed = check_roster_limit(selected, turn, reqs, st.session_state.draft_history, df)
+        if not allowed:
+            st.error(f"⚠️ Cannot pick {selected}. Team {turn} already has maximum {pos_failed}s ({reqs[pos_failed]}).")
+            can_pick = False
+
+    if st.button("CONFIRM PICK", type="primary", use_container_width=True, disabled=not can_pick):
         if selected:
             p_num = len(st.session_state.draft_history) + 1
             turn = get_current_turn(p_num, num_teams)
@@ -109,60 +140,11 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# --- 3. DYNAMIC VORP CALCS ---
+# --- 4. DYNAMIC VORP CALCS ---
 avail_df = df[~df['full_name'].isin(taken_names)].copy()
 if not avail_df.empty:
     baselines = {}
     for pos in ['DEF', 'MID', 'RUC', 'FWD']:
         used = len(df[df['full_name'].isin(taken_names) & df['positions'].str.contains(pos)])
         slots_left = max(1, (reqs[pos] * num_teams) - used)
-        pool = avail_df[avail_df['positions'].str.contains(pos)].sort_values('Power_Rating', ascending=False)
-        idx = min(len(pool)-1, slots_left - 1)
-        baselines[pos] = pool.iloc[idx]['Power_Rating'] if not pool.empty else 80
-
-    avail_df['VORP'] = avail_df.apply(lambda x: round(x['Power_Rating'] - baselines.get(x['positions'].split('/')[0], 80), 1), axis=1)
-    avail_df['Health'] = avail_df['full_name'].map(lambda x: injuries.get(x, "✅ Fit"))
-
-# --- 4. TABS ---
-t1, t2, t3, t4 = st.tabs(["🎯 Board", "📋 My Team", "📈 League", "🏢 Rosters"])
-
-with t1:
-    curr_p = len(st.session_state.draft_history) + 1
-    turn = get_current_turn(curr_p, num_teams)
-    
-    if turn == my_slot:
-        st.success("### 🚨 YOUR TURN!")
-        recs = avail_df.sort_values('VORP', ascending=False).head(3)
-        cols = st.columns(3)
-        for i, (idx, p) in enumerate(recs.iterrows()):
-            cols[i].metric(p['full_name'], f"VORP +{p['VORP']}", p['positions'])
-    
-    st.subheader("Big Board")
-    def color_vorp(val):
-        color = '#1b5e20' if val > 12 else '#2e7d32' if val > 6 else '#388e3c' if val > 0 else 'none'
-        return f'background-color: {color}'
-
-    display_df = avail_df[['full_name', 'positions', 'VORP', 'Power_Rating', 'Health']].sort_values('VORP', ascending=False).head(40)
-    st.dataframe(display_df.style.applymap(color_vorp, subset=['VORP']), use_container_width=True, hide_index=True)
-
-with t2:
-    my_df = df[df['full_name'].isin(st.session_state.my_team)]
-    st.table(my_df[['full_name', 'positions', 'Avg']])
-    st.metric("Proj. Weekly Total", int(my_df['Avg'].sum()))
-
-with t3:
-    if st.session_state.draft_history:
-        st.dataframe(pd.DataFrame(st.session_state.draft_history).sort_values('pick', ascending=False), use_container_width=True)
-
-with t4:
-    view_t = st.radio("Inspect Team:", [f"Team {i}" for i in range(1, num_teams+1)], horizontal=True)
-    tid = int(view_t.split(" ")[1])
-    t_players = df[df['full_name'].isin([d['player'] for d in st.session_state.draft_history if d['team'] == tid])]
-    cols = st.columns(4)
-    for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
-        with cols[i]:
-            st.write(f"**{pos}**")
-            p_list = t_players[t_players['positions'].str.contains(pos)]
-            for idx, p in enumerate(p_list.itertuples()):
-                if idx < reqs[pos]: st.success(p.full_name)
-                else: st.info(f"🔄 {p.full_name}")
+        pool = avail_df[avail_df['positions'].str.contains(pos)].sort_values('
