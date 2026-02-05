@@ -4,134 +4,150 @@ import requests
 import json
 import os
 
-# --- 1. APP CONFIGURATION ---
-st.set_page_config(page_title="Supercoach War Room 2026", layout="wide")
+st.set_page_config(page_title="Supercoach War Room 2026", layout="wide", initial_sidebar_state="expanded")
 
-# --- 2. PERSISTENCE LOGIC (SAVE/LOAD) ---
+# --- 1. PERSISTENCE & DATA ---
 SAVE_FILE = "draft_state.json"
 
 def save_state():
-    state = {
-        "draft_history": st.session_state.draft_history,
-        "my_team": st.session_state.my_team
-    }
     with open(SAVE_FILE, "w") as f:
-        json.dump(state, f)
+        json.dump({"draft_history": st.session_state.draft_history, "my_team": st.session_state.my_team}, f)
 
 def load_state():
     if os.path.exists(SAVE_FILE):
         with open(SAVE_FILE, "r") as f:
             state = json.load(f)
-            st.session_state.draft_history = state["draft_history"]
-            st.session_state.my_team = state["my_team"]
-        st.success("✅ Draft Restored!")
+            st.session_state.draft_history, st.session_state.my_team = state["draft_history"], state["my_team"]
         st.rerun()
 
-# --- 3. DATA ENGINE ---
 @st.cache_data(ttl=3600)
-def get_injury_data():
+def get_injuries():
     try:
-        r = requests.get("https://api.squiggle.com.au/?q=players", timeout=5)
-        return {f"{p['first_name']} {p['surname']}": p['injury'] for p in r.json()['players'] if p['injury']}
+        r = requests.get("https://api.squiggle.com.au/?q=players", timeout=5).json()['players']
+        return {f"{p['first_name']} {p['surname']}": p['injury'] for p in r if p.get('injury')}
     except: return {}
 
 @st.cache_data
-def load_and_score_players():
+def load_data():
     try:
         df = pd.read_csv('supercoach_data.csv')
         df['full_name'] = (df['first_name'] + ' ' + df['last_name']).str.strip()
-        # Advanced Weighting: 50% Season Avg, 30% Recent Form, 20% Reliability
-        df['Power_Rating'] = (df['Avg'] * 0.5 + df['Last3_Avg'] * 0.3 + (df['gamesPlayed'] * 2) * 0.2).round(1)
+        # Simple Bye Round Map (Update based on official 2026 AFL Fixture)
+        bye_map = {
+            'Adelaide': 14, 'Brisbane': 12, 'Carlton': 14, 'Collingwood': 13,
+            'Essendon': 13, 'Fremantle': 12, 'Geelong': 14, 'Gold Coast': 12,
+            'GWS': 13, 'Hawthorn': 15, 'Melbourne': 14, 'North Melbourne': 15,
+            'Port Adelaide': 12, 'Richmond': 15, 'St Kilda': 12, 'Sydney': 13,
+            'West Coast': 14, 'Western Bulldogs': 15
+        }
+        df['Bye'] = df['team'].map(bye_map).fillna(0).astype(int)
+        df['Power_Rating'] = (df['Avg'] * 0.6 + df['Last3_Avg'] * 0.4).round(1)
         return df
     except: return pd.DataFrame()
 
-# Initialize Session States
 if 'draft_history' not in st.session_state: st.session_state.draft_history = []
 if 'my_team' not in st.session_state: st.session_state.my_team = []
 
-df = load_and_score_players()
-injuries = get_injury_data()
+df, injuries = load_data(), get_injuries()
 
-# --- 4. SIDEBAR CONTROLS ---
+# --- 2. SIDEBAR COMMAND ---
 with st.sidebar:
-    st.title("🛡️ Draft Command")
-    
-    # Fix for st.number_input error using named arguments
-    num_teams = st.number_input(label="Total Teams", value=10, min_value=1, step=1)
-    my_slot = st.number_input(label="Your Draft Slot", value=5, min_value=1, max_value=num_teams, step=1)
+    st.title("🛡️ Command Center")
+    num_teams = st.number_input("Total Teams", value=10, min_value=1)
+    my_slot = st.number_input("Your Slot", value=5, min_value=1, max_value=num_teams)
     
     st.divider()
-    st.subheader("💾 Backup")
-    col_s1, col_s2 = st.columns(2)
-    if col_s1.button("Save Now"): save_state()
-    if col_s2.button("Load Last"): load_state()
+    st.write("**Roster Requirements**")
+    c_req1, c_req2 = st.columns(2)
+    reqs = {
+        'DEF': c_req1.number_input("DEF", value=4, min_value=0),
+        'MID': c_req2.number_input("MID", value=6, min_value=0),
+        'RUC': c_req1.number_input("RUC", value=1, min_value=0),
+        'FWD': c_req2.number_input("FWD", value=4, min_value=0)
+    }
     
     st.divider()
-    st.subheader("📢 Record Pick")
+    if st.button("🔄 Recover Draft"): load_state()
+    
+    st.divider()
     taken_names = [d['player'] for d in st.session_state.draft_history]
-    avail_options = sorted(df[~df['full_name'].isin(taken_names)]['full_name'].tolist())
-    
-    selected_player = st.selectbox(label="Select Player", options=[""] + avail_options)
+    avail_list = sorted(df[~df['full_name'].isin(taken_names)]['full_name'].tolist())
+    selected = st.selectbox("Record Pick:", [""] + avail_list)
     
     if st.button("CONFIRM PICK", type="primary", use_container_width=True):
-        if selected_player:
-            pick_num = len(st.session_state.draft_history) + 1
-            round_num = ((pick_num - 1) // num_teams) + 1
-            # Snake Draft Logic
-            if round_num % 2 != 0:
-                turn = (pick_num - 1) % num_teams + 1
-            else:
-                turn = num_teams - ((pick_num - 1) % num_teams)
-            
-            pick_data = {"pick": pick_num, "round": round_num, "team": turn, "player": selected_player}
-            st.session_state.draft_history.append(pick_data)
-            
-            if turn == my_slot:
-                st.session_state.my_team.append(selected_player)
-            
-            save_state() # Auto-save every pick
+        if selected:
+            p_num = len(st.session_state.draft_history) + 1
+            rnd = ((p_num - 1) // num_teams) + 1
+            turn = (p_num - 1) % num_teams + 1 if rnd % 2 != 0 else num_teams - ((p_num - 1) % num_teams)
+            st.session_state.draft_history.append({"pick": p_num, "team": turn, "player": selected})
+            if turn == my_slot: st.session_state.my_team.append(selected)
+            save_state()
             st.rerun()
 
-# --- 5. MAIN INTERFACE ---
-if not df.empty:
-    tab1, tab2, tab3 = st.tabs(["🎯 Draft Board", "📋 My Team", "📈 League View"])
+# --- 3. DYNAMIC VORP CALCS ---
+avail_df = df[~df['full_name'].isin(taken_names)].copy()
+if not avail_df.empty:
+    baselines = {}
+    for pos in ['DEF', 'MID', 'RUC', 'FWD']:
+        used = len(df[df['full_name'].isin(taken_names) & df['positions'].str.contains(pos)])
+        slots_left = max(1, (reqs[pos] * num_teams) - used)
+        pool = avail_df[avail_df['positions'].str.contains(pos)].sort_values('Power_Rating', ascending=False)
+        idx = min(len(pool)-1, slots_left - 1)
+        baselines[pos] = pool.iloc[idx]['Power_Rating'] if not pool.empty else 80
 
-    with tab1:
-        # Calculate Current Turn
-        current_pick = len(st.session_state.draft_history) + 1
-        curr_rnd = ((current_pick - 1) // num_teams) + 1
-        if curr_rnd % 2 != 0: curr_turn = (current_pick - 1) % num_teams + 1
-        else: curr_turn = num_teams - ((current_pick - 1) % num_teams)
+    avail_df['VORP'] = avail_df.apply(lambda x: round(x['Power_Rating'] - baselines.get(x['positions'].split('/')[0], 80), 1), axis=1)
+    avail_df['Health'] = avail_df['full_name'].map(lambda x: injuries.get(x, "✅ Fit"))
 
-        if curr_turn == my_slot:
-            st.warning("⚠️ **YOUR TURN!**")
-        
-        # Available Players with Injury Tags
-        st.subheader("Top Available Players")
-        view_df = df[~df['full_name'].isin(taken_names)].copy()
-        view_df['Injury_Status'] = view_df['full_name'].map(lambda x: injuries.get(x, "✅ Fit"))
-        
-        st.dataframe(
-            view_df[['full_name', 'positions', 'Power_Rating', 'Avg', 'Injury_Status']]
-            .sort_values('Power_Rating', ascending=False).head(30),
-            use_container_width=True, hide_index=True
-        )
+# --- 4. TABS ---
+t1, t2, t3, t4 = st.tabs(["🎯 Board", "📋 My Team", "📈 League", "🏢 Rosters"])
 
-    with tab2:
-        st.subheader("Your Roster")
-        my_players = df[df['full_name'].isin(st.session_state.my_team)]
-        if not my_players.empty:
-            st.table(my_players[['full_name', 'positions', 'Avg']])
-            st.metric("Projected Weekly Score", int(my_players['Avg'].sum()))
-        else:
-            st.info("No players drafted yet.")
+with t1:
+    curr_p = len(st.session_state.draft_history) + 1
+    rnd = ((curr_p - 1) // num_teams) + 1
+    turn = (curr_p - 1) % num_teams + 1 if rnd % 2 != 0 else num_teams - ((curr_p - 1) % num_teams)
+    
+    if turn == my_slot:
+        st.success("### 🚨 YOUR TURN!")
+        recs = avail_df.sort_values('VORP', ascending=False).head(3)
+        cols = st.columns(3)
+        for i, (idx, p) in enumerate(recs.iterrows()):
+            cols[i].metric(p['full_name'], f"VORP +{p['VORP']}", f"Bye: {p['Bye']}")
+    
+    st.subheader("Big Board")
+    def color_vorp(val):
+        color = '#1b5e20' if val > 12 else '#2e7d32' if val > 6 else '#388e3c' if val > 0 else 'none'
+        return f'background-color: {color}'
 
-    with tab3:
-        st.subheader("Draft History")
-        if st.session_state.draft_history:
-            history_df = pd.DataFrame(st.session_state.draft_history)
-            st.dataframe(history_df.sort_values('pick', ascending=False), use_container_width=True)
-        else:
-            st.info("Draft hasn't started.")
-else:
-    st.error("Missing 'supercoach_data.csv'. Please upload the data file.")
+    display_df = avail_df[['full_name', 'positions', 'VORP', 'Power_Rating', 'Bye', 'Health']].sort_values('VORP', ascending=False).head(40)
+    st.dataframe(display_df.style.applymap(color_vorp, subset=['VORP']), use_container_width=True, hide_index=True)
+
+with t2:
+    my_df = df[df['full_name'].isin(st.session_state.my_team)]
+    st.subheader("Current Squad")
+    st.dataframe(my_df[['full_name', 'positions', 'Avg', 'Bye']], use_container_width=True, hide_index=True)
+    
+    st.divider()
+    st.subheader("📅 Bye Round Exposure")
+    if not my_df.empty:
+        bye_counts = my_df['Bye'].value_counts().sort_index()
+        st.bar_chart(bye_counts)
+        st.caption("Avoid having more than 3-4 players on the same bye round to stay competitive.")
+    else:
+        st.info("Draft players to see bye round analysis.")
+
+with t3:
+    if st.session_state.draft_history:
+        st.dataframe(pd.DataFrame(st.session_state.draft_history).sort_values('pick', ascending=False), use_container_width=True)
+
+with t4:
+    view_t = st.radio("Inspect Team:", [f"Team {i}" for i in range(1, num_teams+1)], horizontal=True)
+    tid = int(view_t.split(" ")[1])
+    t_players = df[df['full_name'].isin([d['player'] for d in st.session_state.draft_history if d['team'] == tid])]
+    cols = st.columns(4)
+    for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
+        with cols[i]:
+            st.write(f"**{pos}**")
+            p_list = t_players[t_players['positions'].str.contains(pos)]
+            for idx, p in enumerate(p_list.itertuples()):
+                if idx < reqs[pos]: st.success(f"{p.full_name} (R{p.Bye})")
+                else: st.info(f"🔄 {p.full_name}")
