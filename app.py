@@ -46,8 +46,11 @@ def load_data():
         for col in cols_to_fix:
             df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
         
+        # --- ADJUSTED POWER RATING: 70% WEIGHT ON AVG ---
         def calculate_custom_power(row):
-            score = (row['Avg'] * 0.5) + (row['Last3_Avg'] * 0.3)
+            # Increased weight to 0.7 for Season Average
+            score = (row['Avg'] * 0.7) + (row['Last3_Avg'] * 0.2)
+            
             if 0 < row['gamesPlayed'] < 15: score -= 5.0
             if 'DEF' in row['positions']: score += (row['KickInAvg'] * 0.5)
             if 'MID' in row['positions'] and row['CbaAvg'] > 50: score += 3.0
@@ -96,14 +99,13 @@ with st.sidebar:
         'FWD': c_req2.number_input("FWD", value=4, min_value=0)
     }
 
-    # --- NEW: STRATEGY ADVISOR ---
+    # STRATEGY ADVISOR
     st.divider()
     st.subheader("💡 Draft Strategy")
     curr_team_id = get_current_turn(len(st.session_state.draft_history) + 1, num_teams)
     active_picks = [d for d in st.session_state.draft_history if d['team'] == curr_team_id]
     counts = {pos: sum(1 for p in active_picks if p['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
     
-    # Simple Logic for Tips
     tips = []
     for pos, req in user_inputs.items():
         if counts[pos] == 0: tips.append(f"🚨 CRITICAL: Get a {pos}")
@@ -187,7 +189,7 @@ if not df.empty:
             if not check_roster_limit(p, active_team, user_inputs, st.session_state.draft_history): continue
             v = row['Power_Rating'] - baselines.get(p, 80)
             if team_counts[p] == 0: v += 15.0 
-            elif p == 'RUC' and team_counts[p] == 1: v += 5.0 # Backup Ruck remains important
+            elif p == 'RUC' and team_counts[p] == 1: v += 5.0
             elif team_counts[p] >= user_inputs.get(p, 0): v -= 10.0
             if v > best_v: best_v = v
         return round(best_v, 1)
