@@ -156,7 +156,18 @@ with t2:
     st.dataframe(my_df[['full_name', 'positions', 'Avg']], use_container_width=True)
 
 with t3:
-    st.dataframe(pd.DataFrame(st.session_state.draft_history).sort_values('pick', ascending=False), use_container_width=True)
+    st.subheader("📈 Draft Log")
+    if st.session_state.draft_history:
+        # Create the DataFrame
+        log_df = pd.DataFrame(st.session_state.draft_history)
+        
+        # Check if 'pick' column exists before sorting
+        if 'pick' in log_df.columns:
+            st.dataframe(log_df.sort_values('pick', ascending=False), use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(log_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("The draft hasn't started yet. Records will appear here once picks are confirmed.")
 
 with t4:
     view_t = st.radio("Inspect Team:", [f"Team {i}" for i in range(1, num_teams+1)], horizontal=True)
@@ -169,3 +180,4 @@ with t4:
             p_list = t_players[t_players['positions'].str.contains(pos)]
             for p in p_list.itertuples():
                 st.success(p.full_name)
+
