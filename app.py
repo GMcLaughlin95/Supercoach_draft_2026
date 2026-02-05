@@ -5,6 +5,8 @@ import json
 import os
 
 st.set_page_config(page_title="Supercoach War Room 2026", layout="wide", initial_sidebar_state="expanded")
+# Force columns to match the app's expectations
+df.columns = df.columns.str.strip() # Remove accidental spaces
 
 # --- 1. PERSISTENCE & DATA ---
 SAVE_FILE = "draft_state.json"
@@ -151,8 +153,27 @@ if not avail_df.empty:
 t1, t2, t3, t4 = st.tabs(["🎯 Board", "📋 My Team", "📈 Log", "🏢 Rosters"])
 
 with t1:
-    st.subheader("Big Board")
-    st.dataframe(avail_df[['full_name', 'positions', 'VORP', 'Power_Rating', 'Health']].sort_values('VORP', ascending=False).head(40), use_container_width=True, hide_index=True)
+    st.subheader("🎯 Big Board")
+    
+    # Define the columns we WANT to see
+    desired_cols = ['full_name', 'positions', 'VORP', 'Power_Rating', 'Health']
+    
+    # Filter only the ones that actually exist in avail_df to prevent KeyError
+    available_cols = [c for c in desired_cols if c in avail_df.columns]
+    
+    if not avail_df.empty:
+        # Sort by VORP only if it exists
+        sort_col = 'VORP' if 'VORP' in avail_df.columns else avail_df.columns[0]
+        
+        display_df = avail_df[available_cols].sort_values(sort_col, ascending=False).head(40)
+        
+        st.dataframe(
+            display_df, 
+            use_container_width=True, 
+            hide_index=True
+        )
+    else:
+        st.warning("No players available to display.")
 
 with t2:
     my_df = df[df['full_name'].isin(st.session_state.my_team)]
@@ -176,3 +197,4 @@ with t4:
             p_list = t_players[t_players['positions'].str.contains(pos)]
             for p in p_list.itertuples():
                 st.success(p.full_name)
+
