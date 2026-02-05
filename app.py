@@ -184,7 +184,7 @@ else:
     avail_df = pd.DataFrame()
 
 # --- 5. TABS ---
-t1, t2, t3, t4 = st.tabs(["🎯 Board", "📋 My Team", "📈 Log", "🏢 Rosters"])
+t1, t2, t3, t4 = st.tabs(["🎯 Board", "📋 My Team", "📈 Log", "🏢 Analysis & Rosters"])
 
 # --- INSERT THIS FOR TEAM STRENGTH CHART ---
     st.divider()
@@ -252,4 +252,5 @@ with t4:
             p_list = t_players[t_players['positions'].str.contains(pos, na=False)]
             for p in p_list.itertuples():
                 st.success(p.full_name)
+
 
