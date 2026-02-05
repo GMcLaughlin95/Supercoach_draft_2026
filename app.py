@@ -186,6 +186,25 @@ else:
 # --- 5. TABS ---
 t1, t2, t3, t4 = st.tabs(["🎯 Board", "📋 My Team", "📈 Log", "🏢 Rosters"])
 
+# --- INSERT THIS FOR TEAM STRENGTH CHART ---
+    st.divider()
+    st.subheader("📊 League Power Rankings")
+    
+    # Calculate total Power Rating for every team in the league
+    team_stats = []
+    for i in range(1, num_teams + 1):
+        # Find names of players drafted by this team
+        t_names = [d['player'] for d in st.session_state.draft_history if d['team'] == i]
+        # Sum their Power Ratings
+        total_power = df[df['full_name'].isin(t_names)]['Power_Rating'].sum()
+        team_stats.append({"Team": f"Team {i}", "Power": total_power})
+    
+    # Create the chart
+    if team_stats:
+        chart_df = pd.DataFrame(team_stats)
+        st.bar_chart(chart_df.set_index("Team"), color="#2e7d32")
+    st.divider()
+
 with t1:
     st.subheader("🎯 Big Board")
     if not avail_df.empty:
@@ -233,3 +252,4 @@ with t4:
             p_list = t_players[t_players['positions'].str.contains(pos, na=False)]
             for p in p_list.itertuples():
                 st.success(p.full_name)
+
