@@ -176,3 +176,52 @@ if not df.empty:
         for p in pos_list:
             if not check_roster_limit(p, active_team, user_inputs, st.session_state.draft_history): continue
             v = row['Power_Rating'] - baselines.get(p, 80)
+            if team_counts[p] == 0: v += 15.0 
+            elif p == 'RUC' and team_counts[p] == 1: v += 5.0
+            elif team_counts[p] >= user_inputs.get(p, 0): v -= 10.0
+            if v > best_v: best_v = v
+        return round(best_v, 1)
+
+    avail_df['VORP'] = avail_df.apply(calculate_dynamic_vorp, axis=1)
+else: avail_df = pd.DataFrame()
+
+# --- 5. TABS ---
+t1, t2, t3, t4 = st.tabs(["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis & Rosters"])
+
+with t1:
+    search_q = st.text_input("🔍 Search Player:", "")
+    display_df = avail_df.copy()
+    if search_q: display_df = display_df[display_df['full_name'].str.contains(search_q, case=False)]
+    st.subheader(f"Recommended for Team {active_team}")
+    
+    # RENDER TABLE: Health replaced with Season Avg
+    cols_to_show = ['full_name', 'positions', 'VORP', 'Power_Rating', 'Avg']
+    st.dataframe(
+        display_df[cols_to_show].sort_values('VORP', ascending=False).head(400), 
+        use_container_width=True, 
+        hide_index=True, 
+        height=800
+    )
+
+with t2:
+    st.subheader("My Squad")
+    my_team_display = [d for d in st.session_state.draft_history if d['team'] == my_slot]
+    if my_team_display: st.table(pd.DataFrame(my_team_display)[['player', 'assigned_pos', 'pick']])
+    else: st.info("Draft players to see your team.")
+
+with t3:
+    st.subheader("📈 Draft Log")
+    if st.session_state.draft_history: st.dataframe(pd.DataFrame(st.session_state.draft_history).sort_values('pick', ascending=False), use_container_width=True, hide_index=True)
+
+with t4:
+    st.subheader("📊 League Power Rankings")
+    team_stats = [{"Team": f"Team {i}", "Power": df[df['full_name'].isin([d['player'] for d in st.session_state.draft_history if d['team'] == i])]['Power_Rating'].sum()} for i in range(1, num_teams+1)]
+    if team_stats: st.bar_chart(pd.DataFrame(team_stats).set_index("Team"), color="#2e7d32")
+    st.divider()
+    view_t = st.radio("Inspect Team:", [f"Team {i}" for i in range(1, num_teams+1)], horizontal=True)
+    tid = int(view_t.split(" ")[1]); t_picks = [d for d in st.session_state.draft_history if d['team'] == tid]
+    cols = st.columns(4)
+    for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
+        with cols[i]:
+            st.write(f"**{pos}**")
+            for p in [x for x in t_picks if x['assigned_pos'] == pos]: st.success(p['player'])
