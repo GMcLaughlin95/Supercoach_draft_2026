@@ -5,8 +5,6 @@ import json
 import os
 
 st.set_page_config(page_title="Supercoach War Room 2026", layout="wide", initial_sidebar_state="expanded")
-# Force columns to match the app's expectations
-df.columns = df.columns.str.strip() # Remove accidental spaces
 
 # --- 1. PERSISTENCE & DATA ---
 SAVE_FILE = "draft_state.json"
@@ -197,4 +195,5 @@ with t4:
             p_list = t_players[t_players['positions'].str.contains(pos)]
             for p in p_list.itertuples():
                 st.success(p.full_name)
+
 
