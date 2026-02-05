@@ -4,7 +4,7 @@ import requests
 
 st.set_page_config(page_title="Supercoach War Room Ultra", layout="wide", initial_sidebar_state="expanded")
 
-# --- 1. AUTOMATED DATA FETCHING (Injuries via Squiggle API) ---
+# --- 1. DATA & INJURY FETCHING ---
 @st.cache_data(ttl=3600)
 def fetch_injuries():
     try:
@@ -15,7 +15,6 @@ def fetch_injuries():
             if p['injury'] and p['injury'] != 'None':
                 note = str(p['injury']).lower()
                 name = f"{p['first_name']} {p['surname']}".strip()
-                # Categorize and set scoring penalty
                 if any(x in note for x in ['test', '1 wk', '2 wk']): status, penalty = "🟢 Short", 0.95
                 elif any(x in note for x in ['3 wk', '4 wk', '5 wk', '6 wk']): status, penalty = "🟡 Medium", 0.70
                 else: status, penalty = "🔴 Long", 0.30
@@ -30,12 +29,10 @@ def load_data():
         df['full_name'] = (df['first_name'] + ' ' + df['last_name']).str.strip()
         cols = ['Avg', 'Last3_Avg', 'gamesPlayed', 'KickInAvg', 'CbaAvg']
         for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-        # Base quality score
         df['SuperScore'] = (df['Avg'] * 0.6 + df['Last3_Avg'] * 0.4).round(1)
         return df
     except: return pd.DataFrame()
 
-# Initialize Engine
 df = load_data()
 injury_lookup = fetch_injuries()
 
@@ -43,17 +40,16 @@ if not df.empty:
     if 'draft_history' not in st.session_state: st.session_state.draft_history = []
     if 'my_team_names' not in st.session_state: st.session_state.my_team_names = []
 
-    # --- SIDEBAR: CONTROLS & SETTINGS ---
+    # --- SIDEBAR: CONTROLS ---
     with st.sidebar:
-        st.title("⚙️ Draft Settings")
-        num_teams = st.number_input("Total Teams", 10)
-        my_pos = st.number_input("Your Slot", 5)
+        st.title("⚙️ Settings")
+        num_teams = st.number_input("Total Teams", 10, min_value=1)
+        my_pos = st.number_input("Your Slot", 5, min_value=1, max_value=num_teams)
         st.divider()
         reqs = {'DEF': st.number_input("DEF", 4), 'MID': st.number_input("MID", 6),
                 'RUC': st.number_input("RUC", 1), 'FWD': st.number_input("FWD", 4)}
         
         st.divider()
-        st.header("📢 Entry")
         drafted_names = [d['player'] for d in st.session_state.draft_history]
         avail_list = sorted(df[~df['full_name'].isin(drafted_names)]['full_name'].unique())
         selected = st.selectbox("Select Player:", [""] + avail_list)
@@ -62,7 +58,6 @@ if not df.empty:
             if selected:
                 curr_pick = len(st.session_state.draft_history) + 1
                 rnd = ((curr_pick - 1) // num_teams) + 1
-                # Snake Draft Logic
                 t_idx = (curr_pick - 1) % num_teams + 1 if rnd % 2 != 0 else num_teams - ((curr_pick - 1) % num_teams)
                 
                 if t_idx == my_pos:
@@ -84,16 +79,10 @@ if not df.empty:
                 if last['player'] in st.session_state.my_team_names: st.session_state.my_team_names.remove(last['player'])
                 st.rerun()
 
-    # --- DYNAMIC CALCULATIONS ---
+    # --- CALCULATIONS ---
     avail_df = df[~df['full_name'].isin(drafted_names)].copy()
-    
-    # Injury Penalties
-    def get_adj(row):
-        inj = injury_lookup.get(row['full_name'])
-        return round(row['SuperScore'] * inj['penalty'], 1) if inj else row['SuperScore']
-    avail_df['Adj_Score'] = avail_df.apply(get_adj, axis=1)
+    avail_df['Adj_Score'] = avail_df.apply(lambda x: round(x['SuperScore'] * injury_lookup.get(x['full_name'], {'penalty': 1})['penalty'], 1), axis=1)
 
-    # Scarcity Baselines (Total League Demand)
     used_supply = {p: len(df[df['full_name'].isin(drafted_names) & df['positions'].str.contains(p)]) for p in reqs}
     baselines = {}
     for pos in reqs:
@@ -109,19 +98,17 @@ if not df.empty:
     t1, t2, t3, t4, t5 = st.tabs(["🎯 Board", "📊 Rankings", "📜 Log", "🏢 Clubs", "👥 League Rosters"])
 
     with t1:
-        # Determine Turn
         curr_p = len(st.session_state.draft_history) + 1
         rnd = ((curr_p - 1) // num_teams) + 1
         t_idx = (curr_p - 1) % num_teams + 1 if rnd % 2 != 0 else num_teams - ((curr_p - 1) % num_teams)
         
         if t_idx == my_pos:
-            st.success("### 🚨 YOUR TURN! RECOMMENDED:")
+            st.success("### 🚨 YOUR TURN!")
             recs = avail_df.sort_values('VORP', ascending=False).head(3)
             cols = st.columns(3)
             for i, (idx, p) in enumerate(recs.iterrows()):
                 cols[i].metric(p['full_name'], f"VORP +{p['VORP']}", p['positions'])
-            st.divider()
-
+        
         st.subheader("Big Board")
         top_names = avail_df.sort_values('VORP', ascending=False).head(3)['full_name'].tolist()
         def highlight_picks(s):
@@ -139,17 +126,15 @@ if not df.empty:
             team_p = [d['player'] for d in st.session_state.draft_history if d['team'] == t]
             team_df = df[df['full_name'].isin(team_p)]
             rankings.append({'Team': f"Team {t}", 'Power': round(team_df['SuperScore'].sum(), 1), 'Count': len(team_p)})
-        st.table(pd.DataFrame(rankings).sort_values('Power', ascending=False))
-        
+        if rankings:
+            st.table(pd.DataFrame(rankings).sort_values('Power', ascending=False))
+        else: st.write("Waiting for picks...")
 
     with t3:
         st.title("Pick History")
         if st.session_state.draft_history:
-            # Only attempt to sort if the list has data
-            history_df = pd.DataFrame(st.session_state.draft_history)
-            st.write(history_df.sort_values('pick', ascending=False))
-        else:
-            st.info("No picks have been made yet. Use the sidebar to start the draft!")
+            st.dataframe(pd.DataFrame(st.session_state.draft_history).sort_values('pick', ascending=False), use_container_width=True)
+        else: st.info("No picks yet.")
 
     with t4:
         st.title("Club Depth")
@@ -159,7 +144,7 @@ if not df.empty:
         for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
             with cols[i]:
                 st.write(f"**{pos}**")
-                for _, p in club_p[club_p['positions'].str.contains(pos)].iterrows():
+                for _, p in club_p[club_p['positions'].str.contains(pos)].sort_values('SuperScore', ascending=False).iterrows():
                     status = "~~" if p['full_name'] in drafted_names else ""
                     st.write(f"{status}{p['full_name']} ({int(p['Avg'])}){status}")
 
@@ -168,16 +153,18 @@ if not df.empty:
         view_team = st.radio("Inspect Team:", [f"Team {i}" for i in range(1, num_teams+1)], horizontal=True)
         tid = int(view_team.split(" ")[1])
         t_players = df[df['full_name'].isin([d['player'] for d in st.session_state.draft_history if d['team'] == tid])]
-        cols = st.columns(4)
-        for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
-            with cols[i]:
-                st.subheader(pos)
-                p_list = t_players[t_players['positions'].str.contains(pos)]
-                for idx, p in enumerate(p_list.itertuples()):
-                    label = f"**{p.full_name}** ({p.Avg})"
-                    if idx < reqs[pos]: st.success(label)
-                    else: st.info(f"🔄 {p.full_name}")
+        
+        if not t_players.empty:
+            cols = st.columns(4)
+            for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
+                with cols[i]:
+                    st.subheader(pos)
+                    p_list = t_players[t_players['positions'].str.contains(pos)]
+                    for idx, p in enumerate(p_list.itertuples()):
+                        label = f"**{p.full_name}** ({p.Avg})"
+                        if idx < reqs[pos]: st.success(label)
+                        else: st.info(f"🔄 {p.full_name}")
+        else: st.info(f"Team {tid} hasn't drafted any players yet.")
 
 else:
     st.error("Upload 'supercoach_data.csv' to begin.")
-
