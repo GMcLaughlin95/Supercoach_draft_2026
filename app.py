@@ -1,92 +1,142 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Supercoach Draft Optimizer Pro", layout="wide")
+st.set_page_config(page_title="Supercoach Pro Draft", layout="wide")
 
-# Load data
 @st.cache_data
 def load_data():
     try:
         df = pd.read_csv('supercoach_data.csv')
         df['full_name'] = (df['first_name'] + ' ' + df['last_name']).str.strip()
+        cols = ['Avg', 'Last3_Avg', 'gamesPlayed', 'KickInAvg', 'CbaAvg']
+        for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        
+        def get_superscore(row):
+            score = (row['Avg'] * 0.6) + (row['Last3_Avg'] * 0.4)
+            if row['gamesPlayed'] >= 21: score += 2
+            elif row['gamesPlayed'] <= 14: score -= 5
+            return round(score, 1)
+            
+        df['SuperScore'] = df.apply(get_superscore, axis=1)
         return df
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 df = load_data()
 
 if not df.empty:
-    # Initialize session state
     if 'drafted' not in st.session_state: st.session_state.drafted = []
-    if 'my_team_names' not in st.session_state: st.session_state.my_team_names = []
+    if 'my_team' not in st.session_state: st.session_state.my_team = []
 
-    # --- SIDEBAR ---
+    # --- SIDEBAR SETTINGS ---
     with st.sidebar:
-        st.header("⚙️ Settings")
-        num_teams = st.number_input("Teams", min_value=2, max_value=20, value=10)
-        my_pos = st.number_input("Your Pick #", min_value=1, max_value=num_teams, value=5)
+        st.header("⚙️ League Setup")
+        num_teams = st.number_input("Teams in League", 10)
+        my_pick = st.number_input("Your Draft Position", 5)
+        st.markdown("---")
+        
+        # User-set requirements
+        reqs = {
+            'DEF': st.number_input("DEF Starters", 4),
+            'MID': st.number_input("MID Starters", 6),
+            'RUC': st.number_input("RUC Starters", 1),
+            'FWD': st.number_input("FWD Starters", 4)
+        }
         
         st.markdown("---")
-        req_def = st.number_input("DEF Needs", value=4)
-        req_mid = st.number_input("MID Needs", value=6)
-        req_ruc = st.number_input("RUC Needs", value=1)
-        req_fwd = st.number_input("FWD Needs", value=4)
+        st.header("📢 Draft Entry")
         
-        st.markdown("---")
-        current_pick = len(st.session_state.drafted) + 1
-        round_num = ((current_pick - 1) // num_teams) + 1
-        if round_num % 2 != 0: target_pick = (round_num - 1) * num_teams + my_pos
-        else: target_pick = (round_num * num_teams) - my_pos + 1
-        is_my_turn = (current_pick == target_pick)
+        avail = sorted(df[~df['full_name'].isin(st.session_state.drafted)]['full_name'].unique())
+        new_pick_name = st.selectbox("Select Player:", [""] + avail)
+        
+        if st.button("CONFIRM PICK", type="primary"):
+            if new_pick_name:
+                player_data = df[df['full_name'] == new_pick_name].iloc[0]
+                primary_pos = player_data['positions'].split('/')[0]
+                
+                # Check current turn logic
+                curr_total = len(st.session_state.drafted) + 1
+                rnd = ((curr_total - 1) // num_teams) + 1
+                is_me = (curr_total == ((rnd - 1) * num_teams + my_pick if rnd % 2 != 0 else (rnd * num_teams) - my_pick + 1))
+                
+                # LIMIT LOGIC: Check if my position is full (Req + 2)
+                if is_me:
+                    my_df = df[df['full_name'].isin(st.session_state.my_team)]
+                    current_pos_count = len(my_df[my_df['positions'].str.contains(primary_pos)])
+                    
+                    if current_pos_count >= (reqs[primary_pos] + 2):
+                        st.error(f"❌ Limit Reached! You cannot draft more than {reqs[primary_pos] + 2} {primary_pos}s.")
+                    else:
+                        st.session_state.drafted.append(new_pick_name)
+                        st.session_state.my_team.append(new_pick_name)
+                        st.rerun()
+                else:
+                    st.session_state.drafted.append(new_pick_name)
+                    st.rerun()
 
-        # IMPORTANT: This list filters out drafted players instantly
-        available_list = sorted(df[~df['full_name'].isin(st.session_state.drafted)]['full_name'].unique())
-        new_pick = st.selectbox("Draft Player:", [""] + available_list)
-        
-        if st.button("Confirm Pick") and new_pick != "":
-            st.session_state.drafted.append(new_pick)
-            if is_my_turn: st.session_state.my_team_names.append(new_pick)
-            st.rerun()
-        
         if st.button("Undo Last"):
             if st.session_state.drafted:
-                removed = st.session_state.drafted.pop()
-                if removed in st.session_state.my_team_names: st.session_state.my_team_names.remove(removed)
+                rem = st.session_state.drafted.pop()
+                if rem in st.session_state.my_team: st.session_state.my_team.remove(rem)
                 st.rerun()
 
-    # --- MAIN VIEW ---
-    st.title("🚀 Supercoach Draft Optimizer")
+    # --- DYNAMIC VORP ENGINE ---
+    # 1. Total League Demand
+    league_demand = {k: v * num_teams for k, v in reqs.items()}
     
-    col1, col2 = st.columns(2)
-    col1.metric("Pick #", current_pick)
-    if is_my_turn: col2.success("🎯 YOUR TURN!")
-    else: col2.info(f"Next turn: #{target_pick}")
+    # 2. Global Supply Used
+    global_drafted = df[df['full_name'].isin(st.session_state.drafted)]
+    used_supply = {'DEF':0, 'MID':0, 'RUC':0, 'FWD':0}
+    for _, r in global_drafted.iterrows():
+        p = r['positions'].split('/')[0]
+        if p in used_supply: used_supply[p] += 1
 
-    # Available Players Table
-    st.subheader("📋 Best Available")
-    remaining = df[~df['full_name'].isin(st.session_state.drafted)].copy()
+    # 3. Dynamic Baselines
+    avail_df = df[~df['full_name'].isin(st.session_state.drafted)].copy()
+    baselines = {}
+    for pos in reqs:
+        remaining_slots = max(1, league_demand[pos] - used_supply[pos])
+        pos_pool = avail_df[avail_df['positions'].str.contains(pos)].sort_values('SuperScore', ascending=False)
+        
+        idx = remaining_slots - 1
+        baselines[pos] = pos_pool.iloc[idx]['SuperScore'] if idx < len(pos_pool) else pos_pool.iloc[-1]['SuperScore']
+
+    avail_df['VORP'] = avail_df.apply(lambda x: round(x['SuperScore'] - baselines.get(x['positions'].split('/')[0], 80), 1), axis=1)
+
+    # --- DASHBOARD ---
+    st.title("🚀 Supercoach Pro Draft Board")
     
-    # Simple VORP calc for display
-    remaining['VORP'] = remaining.apply(lambda x: round(x['Avg'] - 98, 1), axis=1) # Baseline 98
-    st.dataframe(remaining[['full_name', 'positions', 'Avg', 'VORP']].sort_values('VORP', ascending=False).head(15), use_container_width=True)
+    c1, c2 = st.columns([1,3])
+    c1.metric("Current Pick", len(st.session_state.drafted) + 1)
+    
+    st.dataframe(avail_df[['full_name', 'positions', 'SuperScore', 'VORP']]
+                 .sort_values('VORP', ascending=False).head(15), use_container_width=True)
 
-    # --- INFOGRAPHIC SECTION ---
+    # --- INFOGRAPHIC WITH INTERCHANGE ---
     st.markdown("---")
-    st.subheader("🏟️ My Team Sheet")
+    st.subheader("🏟️ My Team Structure")
     
-    my_team_df = df[df['full_name'].isin(st.session_state.my_team_names)]
+    my_squad_names = st.session_state.my_team
+    cols = st.columns(4)
     
-    # Layout 4 columns for positions
-    d_col, m_col, r_col, f_col = st.columns(4)
-    layout = [('DEF', d_col, "🟦"), ('MID', m_col, "🟩"), ('RUC', r_col, "🟧"), ('FWD', f_col, "🟥")]
-    
-    for pos, col, emoji in layout:
-        with col:
-            st.markdown(f"### {emoji} {pos}")
-            # Filter players by position
-            p_list = my_team_df[my_team_df['positions'].str.contains(pos)]
-            if not p_list.empty:
-                for _, p in p_list.iterrows():
-                    st.success(f"**{p['full_name']}**\n\nAvg: {p['Avg']}")
-            else:
-                st.write("*Empty*")
+    for i, (pos, icon) in enumerate([('DEF','🟦'),('MID','🟩'),('RUC','🟧'),('FWD','🟥')]):
+        with cols[i]:
+            st.markdown(f"### {icon} {pos}")
+            
+            # Filter my players in this position
+            pos_players = []
+            for name in my_squad_names:
+                p_info = df[df['full_name'] == name].iloc[0]
+                if pos in p_info['positions']:
+                    pos_players.append(p_info)
+            
+            # Display Starters vs Interchange
+            for idx, p in enumerate(pos_players):
+                if idx < reqs[pos]:
+                    st.success(f"**{p['full_name']}** ({p['Avg']})")
+                elif idx < reqs[pos] + 2:
+                    st.info(f"🔄 **INTERCHANGE**\n\n{p['full_name']} ({p['Avg']})")
+            
+            if not pos_players: st.caption("No players selected")
+
+else:
+    st.error("Missing 'supercoach_data.csv'")
