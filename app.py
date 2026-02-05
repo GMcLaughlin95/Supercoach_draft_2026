@@ -4,167 +4,134 @@ import requests
 import json
 import os
 
-st.set_page_config(page_title="Supercoach War Room 2026", layout="wide")
+st.set_page_config(page_title="Supercoach War Room 2026", layout="wide", initial_sidebar_state="expanded")
 
-# --- 1. DATA & INJURY ENGINE ---
-@st.cache_data
-def load_data():
-    try:
-        df = pd.read_csv('supercoach_data.csv')
-        df.columns = df.columns.str.strip().str.replace(' ', '_').str.replace('.', '')
-        # Handle naming
-        if 'first_name' in df.columns and 'last_name' in df.columns:
-            df['full_name'] = df['first_name'].astype(str) + ' ' + df['last_name'].astype(str)
-        else:
-            name_col = next((c for c in df.columns if c.lower() in ['player', 'name', 'full_name']), None)
-            df['full_name'] = df[name_col] if name_col else "Unknown"
-        
-        df['Avg'] = pd.to_numeric(df['avg'], errors='coerce').fillna(0)
-        return df
-    except: return pd.DataFrame()
+# --- 1. PERSISTENCE & DATA ---
+SAVE_FILE = "draft_state.json"
+
+def save_state():
+    with open(SAVE_FILE, "w") as f:
+        json.dump({"draft_history": st.session_state.draft_history, "my_team": st.session_state.my_team}, f)
+
+def load_state():
+    if os.path.exists(SAVE_FILE):
+        with open(SAVE_FILE, "r") as f:
+            state = json.load(f)
+            st.session_state.draft_history, st.session_state.my_team = state["draft_history"], state["my_team"]
+        st.rerun()
 
 @st.cache_data(ttl=3600)
-def get_live_injuries():
+def get_injuries():
     try:
-        # Fetching real-time data from Squiggle API
         r = requests.get("https://api.squiggle.com.au/?q=players", timeout=5).json()['players']
         return {f"{p['first_name']} {p['surname']}": p['injury'] for p in r if p.get('injury')}
     except: return {}
 
-df, injuries = load_data(), get_live_injuries()
+@st.cache_data
+def load_data():
+    try:
+        df = pd.read_csv('supercoach_data.csv')
+        df['full_name'] = (df['first_name'] + ' ' + df['last_name']).str.strip()
+        # Advanced Weighting: 60% Avg, 40% Last 3 Form
+        df['Power_Rating'] = (df['Avg'] * 0.6 + df['Last3_Avg'] * 0.4).round(1)
+        return df
+    except: return pd.DataFrame()
 
-# --- 2. PRE-DRAFT SETTINGS (SIDEBAR) ---
-with st.sidebar:
-    st.title("⚙️ Pre-Draft Settings")
-    
-    with st.expander("League Configuration", expanded=True):
-        n_teams = st.number_input(label="Total Teams", value=10, min_value=1)
-        m_slot = st.number_input(label="Your Draft Position", value=5, min_value=1, max_value=n_teams)
-    
-    with st.expander("Roster Requirements", expanded=True):
-        col1, col2 = st.columns(2)
-        r_def = col1.number_input(label="DEF", value=6, min_value=1)
-        r_mid = col2.number_input(label="MID", value=8, min_value=1)
-        r_ruc = col1.number_input(label="RUC", value=2, min_value=1)
-        r_fwd = col2.number_input(label="FWD", value=6, min_value=1)
-        
-        st.write("**Bench Settings**")
-        st.caption("Max 2 per position as per your rules")
-        b_def = st.slider("Bench DEF", 0, 2, 1)
-        b_mid = st.slider("Bench MID", 0, 2, 1)
-        b_ruc = st.slider("Bench RUC", 0, 2, 0)
-        b_fwd = st.slider("Bench FWD", 0, 2, 1)
-        
-        # Totals for VORP calculation
-        reqs = {
-            "DEF": r_def + b_def,
-            "MID": r_mid + b_mid,
-            "RUC": r_ruc + b_ruc,
-            "FWD": r_fwd + b_fwd
-        }
-
-    if st.button("🚨 RESET DRAFT", use_container_width=True):
-        st.session_state.draft_history = []
-        st.session_state.my_team = []
-        st.rerun()
-
-# --- 3. DRAFT LOGIC ---
 if 'draft_history' not in st.session_state: st.session_state.draft_history = []
 if 'my_team' not in st.session_state: st.session_state.my_team = []
 
-taken = [d['player'] for d in st.session_state.draft_history]
+df, injuries = load_data(), get_injuries()
 
-# Apply Injuries to Main DF
-if not df.empty:
-    df['Injury_Status'] = df['full_name'].map(lambda x: injuries.get(x, "✅ Fit"))
+# --- 2. SIDEBAR COMMAND ---
+with st.sidebar:
+    st.title("🛡️ Command Center")
+    num_teams = st.number_input("Total Teams", value=10, min_value=1)
+    my_slot = st.number_input("Your Slot", value=5, min_value=1, max_value=num_teams)
     
-    # Calculate VORP based on NEW Roster Requirements
-    avail_df = df[~df['full_name'].isin(taken)].copy()
-    for pos in ["DEF", "MID", "RUC", "FWD"]:
-        # Find the 'nth' player likely to be taken based on requirements
-        baseline_idx = (reqs[pos] * n_teams) - len(df[df['full_name'].isin(taken) & df['positions'].str.contains(pos)])
-        pool = avail_df[avail_df['positions'].str.contains(pos)].sort_values('Avg', ascending=False)
-        
-        if not pool.empty:
-            idx = min(len(pool)-1, max(0, baseline_idx))
-            baseline_val = pool.iloc[idx]['Avg']
-            avail_df.loc[avail_df['positions'].str.contains(pos), 'VORP'] = avail_df['Avg'] - baseline_val
+    st.divider()
+    st.write("**Roster Requirements**")
+    c_req1, c_req2 = st.columns(2)
+    reqs = {
+        'DEF': c_req1.number_input("DEF", value=4, min_value=0),
+        'MID': c_req2.number_input("MID", value=6, min_value=0),
+        'RUC': c_req1.number_input("RUC", value=1, min_value=0),
+        'FWD': c_req2.number_input("FWD", value=4, min_value=0)
+    }
+    
+    st.divider()
+    if st.button("🔄 Recover Draft"): load_state()
+    
+    st.divider()
+    taken_names = [d['player'] for d in st.session_state.draft_history]
+    avail_list = sorted(df[~df['full_name'].isin(taken_names)]['full_name'].tolist())
+    selected = st.selectbox("Record Pick:", [""] + avail_list)
+    
+    if st.button("CONFIRM PICK", type="primary", use_container_width=True):
+        if selected:
+            p_num = len(st.session_state.draft_history) + 1
+            rnd = ((p_num - 1) // num_teams) + 1
+            turn = (p_num - 1) % num_teams + 1 if rnd % 2 != 0 else num_teams - ((p_num - 1) % num_teams)
+            st.session_state.draft_history.append({"pick": p_num, "team": turn, "player": selected})
+            if turn == my_slot: st.session_state.my_team.append(selected)
+            save_state()
+            st.rerun()
 
-# --- 4. TABS & INFOGRAPHIC ---
-t1, t2 = st.tabs(["🎯 Draft Board", "📋 My Visual Roster"])
+# --- 3. DYNAMIC VORP CALCS ---
+avail_df = df[~df['full_name'].isin(taken_names)].copy()
+if not avail_df.empty:
+    baselines = {}
+    for pos in ['DEF', 'MID', 'RUC', 'FWD']:
+        used = len(df[df['full_name'].isin(taken_names) & df['positions'].str.contains(pos)])
+        slots_left = max(1, (reqs[pos] * num_teams) - used)
+        pool = avail_df[avail_df['positions'].str.contains(pos)].sort_values('Power_Rating', ascending=False)
+        idx = min(len(pool)-1, slots_left - 1)
+        baselines[pos] = pool.iloc[idx]['Power_Rating'] if not pool.empty else 80
+
+    avail_df['VORP'] = avail_df.apply(lambda x: round(x['Power_Rating'] - baselines.get(x['positions'].split('/')[0], 80), 1), axis=1)
+    avail_df['Health'] = avail_df['full_name'].map(lambda x: injuries.get(x, "✅ Fit"))
+
+# --- 4. TABS ---
+t1, t2, t3, t4 = st.tabs(["🎯 Board", "📋 My Team", "📈 League", "🏢 Rosters"])
 
 with t1:
-    st.subheader("Available Players (Sorted by Value)")
-    # Show Health status prominently
-    st.dataframe(
-        avail_df[['full_name', 'positions', 'Avg', 'VORP', 'Injury_Status']].sort_values('VORP', ascending=False),
-        use_container_width=True,
-        hide_index=True
-    )
+    curr_p = len(st.session_state.draft_history) + 1
+    rnd = ((curr_p - 1) // num_teams) + 1
+    turn = (curr_p - 1) % num_teams + 1 if rnd % 2 != 0 else num_teams - ((curr_p - 1) % num_teams)
+    
+    if turn == my_slot:
+        st.success("### 🚨 YOUR TURN!")
+        recs = avail_df.sort_values('VORP', ascending=False).head(3)
+        cols = st.columns(3)
+        for i, (idx, p) in enumerate(recs.iterrows()):
+            cols[i].metric(p['full_name'], f"VORP +{p['VORP']}", p['positions'])
+    
+    st.subheader("Big Board")
+    # Color scale logic for VORP
+    def color_vorp(val):
+        color = '#1b5e20' if val > 12 else '#2e7d32' if val > 6 else '#388e3c' if val > 0 else 'none'
+        return f'background-color: {color}'
+
+    display_df = avail_df[['full_name', 'positions', 'VORP', 'Power_Rating', 'Health']].sort_values('VORP', ascending=False).head(40)
+    st.dataframe(display_df.style.applymap(color_vorp, subset=['VORP']), use_container_width=True, hide_index=True)
 
 with t2:
-    st.header("🛡️ Team Infographic")
     my_df = df[df['full_name'].isin(st.session_state.my_team)]
-    
-    if not my_df.empty:
-        cols = st.columns(4)
-        for i, pos in enumerate(["DEF", "MID", "RUC", "FWD"]):
-            with cols[i]:
-                st.markdown(f"### {pos}")
-                # Separate Starters from Bench visually
-                starters = my_df[my_df['positions'].str.contains(pos)].head(reqs[pos] - [b_def, b_mid, b_ruc, b_fwd][i])
-                bench = my_df[my_df['positions'].str.contains(pos)].iloc[len(starters):]
-                
-                for p in starters.itertuples():
-                    st.success(f"**{p.full_name}** \n{p.Avg} | {p.Injury_Status}")
-                for p in bench.itertuples():
-                    st.info(f"**BN: {p.full_name}** \n{p.Avg}")
-    else:
-        st.info("Draft players to see your lineup.")
+    st.table(my_df[['full_name', 'positions', 'Avg']])
+    st.metric("Proj. Weekly Total", int(my_df['Avg'].sum()))
 
-    with t3:
-        st.subheader("📊 League Power Rankings")
-        if st.session_state.draft_history:
-            history_df = pd.DataFrame(st.session_state.draft_history)
-            # Merge with master DF to get VORP
-            analysis = history_df.merge(df[['full_name', 'VORP']], left_on='player', right_on='full_name')
-            rankings = analysis.groupby('team')['VORP'].sum().reset_index()
-            
-            # Grading Logic
-            avg_vorp = rankings['VORP'].mean()
-            def get_grade(v):
-                if v > avg_vorp + 20: return "A+"
-                if v > avg_vorp + 10: return "A"
-                if v > avg_vorp: return "B"
-                if v > avg_vorp - 10: return "C"
-                return "D"
-            
-            rankings['Grade'] = rankings['VORP'].apply(get_grade)
-            rankings = rankings.sort_values('VORP', ascending=False)
-            
-            cols = st.columns(len(rankings))
-            for idx, row in enumerate(rankings.itertuples()):
-                with cols[idx]:
-                    st.metric(f"Team {row.team}", f"{row.Grade}", f"{round(row.VORP, 1)} pts")
-            
-            st.divider()
-            st.dataframe(rankings, use_container_width=True, hide_index=True)
-        else:
-            st.info("Draft some players to see league analysis.")
+with t3:
+    if st.session_state.draft_history:
+        st.dataframe(pd.DataFrame(st.session_state.draft_history).sort_values('pick', ascending=False), use_container_width=True)
 
-    with t4:
-        st.subheader("Opponent Scouting")
-        opponent_slots = [i for i in range(1, n_teams + 1) if i != m_slot]
-        view_team = st.selectbox("Select Team:", opponent_slots)
-        t_p = [d['player'] for d in st.session_state.draft_history if d['team'] == view_team]
-        t_df = df[df['full_name'].isin(t_p)]
-        
-        c = st.columns(4)
-        for i, pt in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
-            with c[i]:
-                st.write(f"**{pt}**")
-                for p in t_df[t_df['positions'].str.contains(pt)].itertuples():
-                    st.info(f"{p.full_name}")
-
-
-
+with t4:
+    view_t = st.radio("Inspect Team:", [f"Team {i}" for i in range(1, num_teams+1)], horizontal=True)
+    tid = int(view_t.split(" ")[1])
+    t_players = df[df['full_name'].isin([d['player'] for d in st.session_state.draft_history if d['team'] == tid])]
+    cols = st.columns(4)
+    for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
+        with cols[i]:
+            st.write(f"**{pos}**")
+            p_list = t_players[t_players['positions'].str.contains(pos)]
+            for idx, p in enumerate(p_list.itertuples()):
+                if idx < reqs[pos]: st.success(p.full_name)
+                else: st.info(f"🔄 {p.full_name}")
