@@ -38,8 +38,8 @@ def load_data():
         for col in cols_to_fix:
             df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
         
-        # POWER RATING: 70% Weight on Avg for maximum total team average
         def calculate_custom_power(row):
+            # 70% Weight on Avg for maximum total team average
             score = (row['Avg'] * 0.7) + (row['Last3_Avg'] * 0.2)
             if 0 < row['gamesPlayed'] < 15: score -= 5.0
             if 'DEF' in row['positions']: score += (row['KickInAvg'] * 0.5)
@@ -108,17 +108,14 @@ with st.sidebar:
     if col_s2.button("🔄 Recover"): load_state()
     if st.button("🚨 RESET DRAFT", use_container_width=True): reset_draft()
     
-    # RESTORED SIMULATION FEATURE
     if st.button("🤖 Sim to My Turn", use_container_width=True):
         while True:
             curr_p = len(st.session_state.draft_history) + 1
             turn = get_current_turn(curr_p, num_teams)
             if turn == my_slot: break
-            
             taken_sim = [d['player'] for d in st.session_state.draft_history]
             avail_sim = df[~df['full_name'].isin(taken_sim)].sort_values('Power_Rating', ascending=False)
             if avail_sim.empty: break
-            
             ai_choice, ai_pos = None, None
             for _, row in avail_sim.iterrows():
                 possible_pos = row['positions'].split('/')
@@ -127,7 +124,6 @@ with st.sidebar:
                         ai_choice, ai_pos = row['full_name'], p
                         break
                 if ai_choice: break
-            
             if ai_choice:
                 st.session_state.draft_history.append({"pick": curr_p, "team": turn, "player": ai_choice, "assigned_pos": ai_pos})
             else: break
@@ -144,24 +140,20 @@ with st.sidebar:
         possible_pos = player_row['positions'].split('/')
         if len(possible_pos) > 1: assigned_pos = st.radio(f"Assign {selected} to:", possible_pos, horizontal=True)
         else: assigned_pos = possible_pos[0]
-
         if check_roster_limit(assigned_pos, active_team, user_inputs, st.session_state.draft_history):
             can_confirm = True
         else: st.error(f"❌ Team {active_team} is full at {assigned_pos}")
 
     if st.button("CONFIRM PICK", type="primary", use_container_width=True, disabled=not can_confirm):
         st.session_state.draft_history.append({"pick": curr_p_num, "team": active_team, "player": selected, "assigned_pos": assigned_pos})
-        if active_team == my_slot: st.session_state.my_team.append(selected)
         save_state(); st.rerun()
 
 # --- 4. SCARCITY-MAX VORP CALCULATION ---
 if not df.empty:
     avail_df = df[~df['full_name'].isin(taken_names)].copy()
-    
     baselines = {}
     for pos in ['DEF', 'MID', 'RUC', 'FWD']:
         pool = avail_df[avail_df['positions'].str.contains(pos, na=False)].sort_values('Power_Rating', ascending=False)
-        # Baseline set to current team count + 12 to look ahead at the next round drop-off
         baselines[pos] = pool.iloc[min(len(pool)-1, 12)]['Power_Rating'] if not pool.empty else 80
 
     def calculate_dynamic_vorp(row):
@@ -170,9 +162,9 @@ if not df.empty:
         for p in pos_list:
             if not check_roster_limit(p, active_team, user_inputs, st.session_state.draft_history): continue
             v = row['Power_Rating'] - baselines.get(p, 80)
-            if counts[p] == 0: v += 15.0 # Urgency boost
-            elif p == 'RUC' and counts[p] == 1: v += 5.0 # 2nd Ruck logic
-            elif counts[p] >= user_inputs.get(p, 0): v -= 10.0 # Bench penalty
+            if counts[p] == 0: v += 15.0 
+            elif p == 'RUC' and counts[p] == 1: v += 5.0
+            elif counts[p] >= user_inputs.get(p, 0): v -= 10.0
             if v > best_v: best_v = v
         return round(best_v, 1)
 
@@ -183,16 +175,24 @@ else: avail_df = pd.DataFrame()
 t1, t2, t3, t4 = st.tabs(["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis & Rosters"])
 
 with t1:
+    # --- NEW FEATURE: DRAFT RECOMMENDATION ---
+    if not avail_df.empty:
+        rec = avail_df.sort_values('VORP', ascending=False).iloc[0]
+        st.markdown(f"""
+        ### 🎯 Top Recommendation: **{rec['full_name']}**
+        **Value:** {rec['VORP']} VORP | **Season Avg:** {rec['Avg']} | **Pos:** {rec['positions']}
+        """)
+        st.divider()
+    
     search_q = st.text_input("🔍 Search Player:", "")
     display_df = avail_df.copy()
     if search_q: display_df = display_df[display_df['full_name'].str.contains(search_q, case=False)]
-    st.subheader(f"Recommended for Team {active_team}")
     
-    # Columns show 'Avg' instead of 'Health'
+    st.subheader(f"Rankings for Team {active_team}")
     cols_to_show = ['full_name', 'positions', 'VORP', 'Power_Rating', 'Avg']
     st.dataframe(
         display_df[cols_to_show].sort_values('VORP', ascending=False).head(400), 
-        use_container_width=True, hide_index=True, height=800
+        use_container_width=True, hide_index=True, height=700
     )
 
 with t2:
