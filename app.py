@@ -66,15 +66,12 @@ def get_current_turn(curr_pick, total_teams):
     rnd = ((curr_pick - 1) // total_teams) + 1
     return (curr_pick - 1) % total_teams + 1 if rnd % 2 != 0 else total_teams - ((curr_pick - 1) % total_teams)
 
-def check_roster_limit(player_name, team_id, user_inputs, history_list, data_df):
-    player_row = data_df[data_df['full_name'] == player_name]
-    if player_row.empty: return True, None, 0
-    p_pos = player_row.iloc[0]['positions']
-    team_p_names = [d['player'] for d in history_list if d['team'] == team_id]
-    team_df = data_df[data_df['full_name'].isin(team_p_names)]
-    for pos in ['DEF', 'MID', 'RUC', 'FWD']:
-        if pos in p_pos:
-            current_count = len(team_df[team_df['positions'].str.contains(pos, na=False)])
+def check_roster_limit(chosen_pos, team_id, user_inputs, history_list):
+    """Checks the count based on the 'assigned_pos' key in your draft history."""
+    team_picks = [d for d in history_list if d['team'] == team_id]
+    current_count = sum(1 for p in team_picks if p.get('assigned_pos') == chosen_pos)
+    max_limit = user_inputs.get(chosen_pos, 0) + 2
+    return current_count < max_limit
             if current_count >= user_inputs[pos] + 2:
                 return False, pos, current_count
     ruc_c = len(team_df[team_df['positions'].str.contains('RUC', na=False)]) if 'RUC' in p_pos else 0
@@ -140,11 +137,16 @@ with st.sidebar:
             st.error(f"❌ Limit Reached: {pos_failed}")
             can_confirm = False
 
-    if st.button("CONFIRM PICK", type="primary", use_container_width=True, disabled=not can_confirm):
-        if selected:
+
+if st.button("CONFIRM PICK", type="primary", use_container_width=True, disabled=not can_confirm):
+    st.session_state.draft_history.append({
+        "pick": p_num, 
+        "team": turn, 
+        "player": selected, 
+        "assigned_pos": assigned_pos  # <--- This is the critical new data point
+    })
             p_num = len(st.session_state.draft_history) + 1
             turn = get_current_turn(p_num, num_teams)
-            st.session_state.draft_history.append({"pick": p_num, "team": turn, "player": selected})
             if turn == my_slot: st.session_state.my_team.append(selected)
             save_state(); st.rerun()
 
@@ -205,3 +207,15 @@ with t4:
             p_list = t_players[t_players['positions'].str.contains(pos, na=False)]
             for p in p_list.itertuples():
                 st.success(p.full_name)
+
+
+
+
+
+
+
+
+
+
+
+    
