@@ -82,7 +82,6 @@ def get_team_name(tid):
 
 def check_roster_limit(chosen_pos, team_id, p, history_list):
     count = sum(1 for d in history_list if d['team'] == team_id and d.get('assigned_pos') == chosen_pos)
-    # Amendment: Strictly cap RUC at 2
     if chosen_pos == "RUC":
         return count < 2
     return count < (p.get(chosen_pos, 0) + 2)
@@ -122,33 +121,42 @@ elif st.session_state.step == "draft":
 
     curr_p_num = len(st.session_state.draft_history) + 1
     active_id = get_current_turn(curr_p_num, p['num_teams'])
-    total_slots = sum([p['DEF'], p['MID'], p['RUC'], p['FWD']]) + 8
-    is_complete = len(st.session_state.draft_history) >= (p['num_teams'] * total_slots)
+    
+    # Calculate total picks required (Fielded slots + 8 bench per team)
+    total_slots_per_team = sum([p['DEF'], p['MID'], p['RUC'], p['FWD']]) + 8
+    is_complete = len(st.session_state.draft_history) >= (p['num_teams'] * total_slots_per_team)
 
     taken_names = [d['player'] for d in st.session_state.draft_history]
     avail_df = df[~df['full_name'].isin(taken_names)].copy()
 
     if is_complete:
+        st.balloons()
         st.success("🎊 DRAFT COMPLETE!")
     else:
         st.subheader(f"⏱️ Now Picking: {get_team_name(active_id)}")
         act_c1, act_c2 = st.columns([1, 2])
         with act_c1:
             if st.button("🤖 Sim to My Turn", use_container_width=True):
-                while True:
+                while not is_complete:
                     cp = len(st.session_state.draft_history) + 1
                     tn = get_current_turn(cp, p['num_teams'])
                     if tn == p['my_slot']: break
+                    
                     tkn = [d['player'] for d in st.session_state.draft_history]
                     av_sim = df[~df['full_name'].isin(tkn)].sort_values('Power_Rating', ascending=False)
                     if av_sim.empty: break
+                    
                     choice, p_pos = None, None
                     for _, r in av_sim.iterrows():
                         for po in r['positions'].split('/'):
                             if check_roster_limit(po, tn, p, st.session_state.draft_history):
                                 choice, p_pos = r['full_name'], po; break
                         if choice: break
-                    if choice: st.session_state.draft_history.append({"pick": cp, "team": tn, "player": choice, "assigned_pos": p_pos})
+                    
+                    if choice:
+                        st.session_state.draft_history.append({"pick": cp, "team": tn, "player": choice, "assigned_pos": p_pos})
+                        if len(st.session_state.draft_history) >= (p['num_teams'] * total_slots_per_team):
+                            is_complete = True; break
                     else: break
                 save_state(); st.rerun()
         with act_c2:
@@ -163,6 +171,7 @@ elif st.session_state.step == "draft":
                 st.session_state.draft_history.append({"pick": curr_p_num, "team": active_id, "player": sel, "assigned_pos": conf_pos})
                 save_state(); st.rerun()
 
+        # Recommendations Logic
         if not avail_df.empty:
             active_pks = [d for d in st.session_state.draft_history if d['team'] == active_id]
             counts = {pos: sum(1 for d in active_pks if d['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
@@ -176,10 +185,14 @@ elif st.session_state.step == "draft":
             st.markdown(f"<p style='font-size: 0.85rem; color: #666;'>💡 Recommended: {rec_text}</p>", unsafe_allow_html=True)
 
     # --- TABS ---
-    tabs = st.tabs(["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis"] + (["🏆 Final Teams"] if is_complete else []))
+    tab_list = ["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis"]
+    if is_complete:
+        tab_list.append("🏆 Final Teams")
+    
+    tabs = st.tabs(tab_list)
     
     with tabs[0]:
-        if is_complete: st.info("Draft Complete.")
+        if is_complete: st.info("Draft Complete. See 'Final Teams' for stats.")
         else:
             search = st.text_input("🔍 Filter Board:", "")
             disp = avail_df.copy()
@@ -191,8 +204,9 @@ elif st.session_state.step == "draft":
             st.divider()
             cols = st.columns(4)
             for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
-                rem = p[pos] - counts[pos]
-                cols[i].metric(pos, f"{counts[pos]}/{p[pos]}", delta=f"-{rem}" if rem > 0 else "FULL", delta_color="inverse" if rem > 0 else "normal")
+                cur_c = sum(1 for d in st.session_state.draft_history if d['team'] == active_id and d['assigned_pos'] == pos)
+                rem = p[pos] - cur_c
+                cols[i].metric(pos, f"{cur_c}/{p[pos]}", delta=f"-{rem}" if rem > 0 else "FULL", delta_color="inverse" if rem > 0 else "normal")
 
     with tabs[1]:
         my_pks = [d for d in st.session_state.draft_history if d['team'] == p['my_slot']]
@@ -223,35 +237,28 @@ elif st.session_state.step == "draft":
 
     if is_complete:
         with tabs[4]:
-            st.header("🏆 League Performance Summary")
-            all_stats = []
+            st.header("🏆 Final League Standings")
+            final_stats = []
             for i in range(1, p['num_teams'] + 1):
                 t_pks = [d for d in st.session_state.draft_history if d['team'] == i]
                 
-                # Amendment: Calculate Fielded vs Full Squad with Priority Logic
-                on_field_total = 0.0
-                full_squad_total = 0.0
-                
+                f_score, w_score = 0.0, 0.0
                 for pos in ['DEF', 'MID', 'RUC', 'FWD']:
-                    pos_list = [d['player'] for d in t_pks if d['assigned_pos'] == pos]
-                    # Get their scores and sort high to low to fill field first
-                    scores = sorted(df[df['full_name'].isin(pos_list)]['Avg'].tolist(), reverse=True)
+                    p_list = [d['player'] for d in t_pks if d['assigned_pos'] == pos]
+                    # Priority logic: sort high to low
+                    p_avg = sorted(df[df['full_name'].isin(p_list)]['Avg'].tolist(), reverse=True)
                     
-                    limit = p[pos]
-                    on_field_total += sum(scores[:limit])
-                    full_squad_total += sum(scores)
+                    f_score += sum(p_avg[:p[pos]])
+                    w_score += sum(p_avg)
                 
-                all_stats.append({
-                    "Team": get_team_name(i), 
-                    "On-Field Points": round(on_field_total, 1), 
-                    "Full Squad Points": round(full_squad_total, 1)
+                final_stats.append({
+                    "Team Name": get_team_name(i),
+                    "Combined Points (Fielded)": round(f_score, 1),
+                    "Combined Points (Whole Team)": round(w_score, 1)
                 })
             
-            st.table(pd.DataFrame(all_stats).sort_values("On-Field Points", ascending=False))
-            
+            st.table(pd.DataFrame(final_stats).sort_values("Combined Points (Fielded)", ascending=False))
             st.divider()
-            st.subheader("Roster Breakdowns")
             for i in range(1, p['num_teams'] + 1):
-                with st.expander(f"📍 {get_team_name(i)} Full List"):
+                with st.expander(f"📍 {get_team_name(i)} Final Roster"):
                     st.dataframe(pd.DataFrame([d for d in st.session_state.draft_history if d['team'] == i])[['pick', 'player', 'assigned_pos']], hide_index=True)
-
