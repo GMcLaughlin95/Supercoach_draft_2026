@@ -46,7 +46,6 @@ def load_data():
             df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
         
         def calculate_custom_power(row):
-            # 90% Weight on Avg
             score = (row['Avg'] * 0.9) + (row['Last3_Avg'] * 0.05)
             if 'DEF' in row['positions']: score += (row['KickInAvg'] * 0.2)
             return round(score, 1)
@@ -63,6 +62,7 @@ def load_data():
         st.error(f"Error loading CSV: {e}")
         return pd.DataFrame()
 
+# Session State Init
 if 'draft_history' not in st.session_state: st.session_state.draft_history = []
 if 'my_team' not in st.session_state: st.session_state.my_team = []
 if 'team_names' not in st.session_state: st.session_state.team_names = {}
@@ -84,7 +84,14 @@ def check_roster_limit(chosen_pos, team_id, user_inputs, history_list):
     current_count = sum(1 for p in team_picks if p.get('assigned_pos') == chosen_pos)
     return current_count < (user_inputs.get(chosen_pos, 0) + 2)
 
-# --- 3. SIDEBAR ---
+# --- 3. DRAFT COMPLETION LOGIC ---
+total_required_per_team = sum(user_inputs.values()) + (len(user_inputs) * 2) if 'user_inputs' in locals() else 0
+# Dynamic check
+is_draft_complete = False
+if not df.empty and 'num_teams' in locals():
+    is_draft_complete = len(st.session_state.draft_history) >= (num_teams * total_required_per_team)
+
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.title("🛡️ Command Center")
     num_teams = st.number_input("Total Teams", value=10, min_value=1)
@@ -106,165 +113,150 @@ with st.sidebar:
         'RUC': c_req1.number_input("RUC", value=2, min_value=0),
         'FWD': c_req2.number_input("FWD", value=6, min_value=0)
     }
-
-    st.divider()
-    curr_p_num = len(st.session_state.draft_history) + 1
-    active_team_id = get_current_turn(curr_p_num, num_teams)
-    active_name = get_team_name(active_team_id)
-    st.subheader(f"Turn: {active_name}")
     
-    if st.button("🤖 Sim to My Turn", use_container_width=True):
-        while True:
-            curr_p = len(st.session_state.draft_history) + 1
-            turn = get_current_turn(curr_p, num_teams)
-            if turn == my_slot: break
-            taken_sim = [d['player'] for d in st.session_state.draft_history]
-            avail_sim = df[~df['full_name'].isin(taken_sim)].sort_values('Power_Rating', ascending=False)
-            if avail_sim.empty: break
-            ai_choice, ai_pos = None, None
-            for _, row in avail_sim.iterrows():
-                possible_pos = row['positions'].split('/')
-                for p in possible_pos:
-                    if check_roster_limit(p, turn, user_inputs, st.session_state.draft_history):
-                        ai_choice, ai_pos = row['full_name'], p
-                        break
-                if ai_choice: break
-            if ai_choice:
-                st.session_state.draft_history.append({"pick": curr_p, "team": turn, "player": ai_choice, "assigned_pos": ai_pos})
-            else: break
-        save_state(); st.rerun()
-
     st.divider()
     col_s1, col_s2 = st.columns(2)
     if col_s1.button("💾 Save"): save_state()
     if col_s2.button("🔄 Recover"): load_state()
     if st.button("🚨 RESET DRAFT", use_container_width=True): reset_draft()
+
+# --- 5. TOP ACTION AREA (ABOVE TABS) ---
+curr_p_num = len(st.session_state.draft_history) + 1
+active_team_id = get_current_turn(curr_p_num, num_teams)
+active_name = get_team_name(active_team_id)
+
+if is_draft_complete:
+    st.success("🎊 DRAFT COMPLETE! View all rosters in the 'Final Teams' tab.")
+else:
+    st.subheader(f"⏱️ Now Picking: {active_name}")
+    act_col1, act_col2 = st.columns([1, 2])
     
-    st.divider()
-    taken_names = [d['player'] for d in st.session_state.draft_history]
-    avail_list = sorted(df[~df['full_name'].isin(taken_names)]['full_name'].tolist()) if not df.empty else []
-    selected = st.selectbox("Record Pick:", [""] + avail_list)
-    
-    assigned_pos, can_confirm = None, False
-    if selected:
-        player_row = df[df['full_name'] == selected].iloc[0]
-        possible_pos = player_row['positions'].split('/')
-        if len(possible_pos) > 1: assigned_pos = st.radio(f"Assign to:", possible_pos, horizontal=True)
-        else: assigned_pos = possible_pos[0]
-        if check_roster_limit(assigned_pos, active_team_id, user_inputs, st.session_state.draft_history):
-            can_confirm = True
+    with act_col1:
+        if st.button("🤖 Sim to My Turn", use_container_width=True):
+            while True:
+                curr_p = len(st.session_state.draft_history) + 1
+                turn = get_current_turn(curr_p, num_teams)
+                if turn == my_slot: break
+                taken_sim = [d['player'] for d in st.session_state.draft_history]
+                avail_sim = df[~df['full_name'].isin(taken_sim)].sort_values('Power_Rating', ascending=False)
+                if avail_sim.empty: break
+                ai_choice, ai_pos = None, None
+                for _, row in avail_sim.iterrows():
+                    possible_pos = row['positions'].split('/')
+                    for p in possible_pos:
+                        if check_roster_limit(p, turn, user_inputs, st.session_state.draft_history):
+                            ai_choice, ai_pos = row['full_name'], p
+                            break
+                    if ai_choice: break
+                if ai_choice:
+                    st.session_state.draft_history.append({"pick": curr_p, "team": turn, "player": ai_choice, "assigned_pos": ai_pos})
+                else: break
+            save_state(); st.rerun()
 
-    if st.button("CONFIRM PICK", type="primary", use_container_width=True, disabled=not can_confirm):
-        st.session_state.draft_history.append({"pick": curr_p_num, "team": active_team_id, "player": selected, "assigned_pos": assigned_pos})
-        save_state(); st.rerun()
+    with act_col2:
+        taken_names = [d['player'] for d in st.session_state.draft_history]
+        avail_list = sorted(df[~df['full_name'].isin(taken_names)]['full_name'].tolist()) if not df.empty else []
+        
+        r_col1, r_col2, r_col3 = st.columns([2, 1, 1])
+        selected = r_col1.selectbox("Select Player:", [""] + avail_list, label_visibility="collapsed")
+        
+        assigned_pos, can_confirm = None, False
+        if selected:
+            player_row = df[df['full_name'] == selected].iloc[0]
+            possible_pos = player_row['positions'].split('/')
+            assigned_pos = r_col2.radio("Pos:", possible_pos, horizontal=True, label_visibility="collapsed")
+            if check_roster_limit(assigned_pos, active_team_id, user_inputs, st.session_state.draft_history):
+                can_confirm = True
+        
+        if r_col3.button("CONFIRM", type="primary", disabled=not can_confirm, use_container_width=True):
+            st.session_state.draft_history.append({"pick": curr_p_num, "team": active_team_id, "player": selected, "assigned_pos": assigned_pos})
+            save_state(); st.rerun()
 
-# --- 4. CALCULATIONS & FIXES ---
-if not df.empty:
-    avail_df = df[~df['full_name'].isin(taken_names)].copy()
-    active_picks = [d for d in st.session_state.draft_history if d['team'] == active_team_id]
-    counts = {pos: sum(1 for p in active_picks if p['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
-    
-    lookahead = num_teams + 2
-    costs = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
-    for pos in costs:
-        pool = avail_df[avail_df['positions'].str.contains(pos, na=False)].sort_values('Power_Rating', ascending=False)
-        if len(pool) > lookahead: costs[pos] = pool.iloc[0]['Power_Rating'] - pool.iloc[lookahead]['Power_Rating']
+    # RECOMMENDATIONS AREA
+    if not df.empty:
+        avail_df = df[~df['full_name'].isin(taken_names)].copy()
+        # Optimizer Logic (Same as before)
+        active_picks = [d for d in st.session_state.draft_history if d['team'] == active_team_id]
+        counts = {pos: sum(1 for p in active_picks if p['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
+        costs = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
+        for pos in costs:
+            pool = avail_df[avail_df['positions'].str.contains(pos, na=False)].sort_values('Power_Rating', ascending=False)
+            if len(pool) > (num_teams + 2): costs[pos] = pool.iloc[0]['Power_Rating'] - pool.iloc[num_teams+2]['Power_Rating']
+        
+        avail_df['Optimizer_Score'] = avail_df.apply(lambda row: max([row['Power_Rating'] + (costs.get(p, 0) * 0.4) + (5.0 if counts[p] < user_inputs[p] else -25.0) for p in row['positions'].split('/') if check_roster_limit(p, active_team_id, user_inputs, st.session_state.draft_history)] + [-999]), axis=1)
+        
+        top_3 = avail_df[avail_df['Optimizer_Score'] > -500].sort_values('Optimizer_Score', ascending=False).head(3)
+        
+        rec_text = " / ".join([f"**{i+1}. {r['full_name']}** ({r['positions']})" for i, r in top_3.iterrows()])
+        st.markdown(f"<p style='font-size: 0.85rem; color: #666;'>💡 Recommended: {rec_text}</p>", unsafe_allow_html=True)
 
-    def calculate_display_score(row):
-        pos_list = row['positions'].split('/')
-        best_val = -999.0
-        for p in pos_list:
-            if not check_roster_limit(p, active_team_id, user_inputs, st.session_state.draft_history): continue
-            v = row['Power_Rating'] + (costs.get(p, 0) * 0.4)
-            if counts[p] < user_inputs[p]: v += 5.0
-            else: v -= 25.0
-            if v > best_val: best_val = v
-        return best_val
+# --- 6. TABS ---
+tab_list = ["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis"]
+if is_draft_complete: tab_list.append("🏆 Final Teams")
+tabs = st.tabs(tab_list)
 
-    avail_df['Optimizer_Score'] = avail_df.apply(calculate_display_score, axis=1)
-else: avail_df = pd.DataFrame()
-
-# --- 5. TABS ---
-t1, t2, t3, t4 = st.tabs(["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis"])
-
-with t1:
-    search_q = st.text_input("🔍 Search Player:", "")
+with tabs[0]:
+    search_q = st.text_input("🔍 Filter Board:", "")
     display_df = avail_df.copy()
-    if search_q: 
-        display_df = display_df[display_df['full_name'].str.contains(search_q, case=False)]
+    if search_q: display_df = display_df[display_df['full_name'].str.contains(search_q, case=False)]
     
     if not display_df.empty:
-        # We handle sorting BEFORE adding the display label to avoid the KeyError
         display_df = display_df.sort_values('Optimizer_Score', ascending=False)
-        display_df['Score_Display'] = display_df['Optimizer_Score'].apply(lambda x: "POS FULL" if x <= -500 else round(x, 1))
-        
-        st.dataframe(
-            display_df[['full_name', 'positions', 'Score_Display', 'Avg', 'Risk_Profile', 'gamesPlayed']].head(400), 
-            use_container_width=True, hide_index=True, height=600
-        )
-    else:
-        st.write("No players available matching criteria.")
+        display_df['Score'] = display_df['Optimizer_Score'].apply(lambda x: "FULL" if x <= -500 else round(x, 1))
+        st.dataframe(display_df[['full_name', 'positions', 'Score', 'Avg', 'Risk_Profile', 'gamesPlayed']].head(200), use_container_width=True, hide_index=True)
     
     st.divider()
-    st.subheader(f"Roster Status: {active_name}")
-    cols = st.columns(4)
+    st.caption(f"Remaining Slots for {active_name}:")
+    c_cols = st.columns(4)
     for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
         rem = user_inputs[pos] - counts[pos]
-        label = f"**{pos}:** {counts[pos]}/{user_inputs[pos]}"
-        if rem > 0: cols[i].warning(f"{label} (Need {rem})")
-        else: cols[i].success(f"{label} (Bench Mode)")
+        c_cols[i].metric(pos, f"{counts[pos]}/{user_inputs[pos]}", delta=f"-{rem}" if rem > 0 else "FULL", delta_color="inverse" if rem > 0 else "normal")
 
-with t2:
+with tabs[1]:
     my_picks = [d for d in st.session_state.draft_history if d['team'] == my_slot]
     if my_picks:
-        total_team_avg = round(df[df['full_name'].isin([p['player'] for p in my_picks])]['Avg'].sum(), 1)
-        st.subheader(f"{get_team_name(my_slot)} | Total Score: {total_team_avg}")
-        
-        # INFOGRAPHIC
-        st.markdown("### 🏟️ Team Infographic")
+        st.subheader(f"🏟️ {get_team_name(my_slot)} Infographic")
         info_cols = st.columns(5)
-        categories = ['DEF', 'MID', 'RUC', 'FWD', 'Bench']
         on_field = {pos: [] for pos in ['DEF', 'MID', 'RUC', 'FWD']}
-        bench_list = []
-        tracking_counts = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
-        
+        bench = []
+        tracking = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
         for p in my_picks:
-            pos = p['assigned_pos']
-            if tracking_counts[pos] < user_inputs[pos]:
-                on_field[pos].append(p['player'])
-                tracking_counts[pos] += 1
-            else:
-                bench_list.append(f"{p['player']} ({pos})")
+            if tracking[p['assigned_pos']] < user_inputs[p['assigned_pos']]:
+                on_field[p['assigned_pos']].append(p['player'])
+                tracking[p['assigned_pos']] += 1
+            else: bench.append(f"{p['player']} ({p['assigned_pos']})")
         
-        for i, cat in enumerate(categories):
+        for i, cat in enumerate(['DEF', 'MID', 'RUC', 'FWD', 'Bench']):
             with info_cols[i]:
                 st.write(f"**{cat}**")
-                players = on_field[cat] if cat != 'Bench' else bench_list
-                for name in players: st.info(name)
-    else: st.info("Draft players to see your squad.")
+                for name in (on_field[cat] if cat != 'Bench' else bench): st.info(name)
+    else: st.info("No players drafted yet.")
 
-with t3:
+with tabs[2]:
     if st.session_state.draft_history:
         log_df = pd.DataFrame(st.session_state.draft_history).copy()
         log_df['team_name'] = log_df['team'].apply(get_team_name)
         st.dataframe(log_df[['pick', 'team_name', 'player', 'assigned_pos']].sort_values('pick', ascending=False), use_container_width=True, hide_index=True)
 
-with t4:
+with tabs[3]:
     st.subheader("League Analysis")
     all_teams_data = []
     for i in range(1, num_teams + 1):
         t_picks = [d for d in st.session_state.draft_history if d['team'] == i]
         t_df = df[df['full_name'].isin([p['player'] for p in t_picks])]
-        
         row = {"Team": get_team_name(i), "Total": t_df['Avg'].sum()}
         for pos in ['DEF', 'MID', 'RUC', 'FWD']:
-            # Calculate points per position based on assigned role
-            pos_players = [p['player'] for p in t_picks if p['assigned_pos'] == pos]
-            row[pos] = df[df['full_name'].isin(pos_players)]['Avg'].sum()
+            row[pos] = df[df['full_name'].isin([p['player'] for p in t_picks if p['assigned_pos'] == pos])]['Avg'].sum()
         all_teams_data.append(row)
-    
     if all_teams_data:
         stats_df = pd.DataFrame(all_teams_data)
         st.bar_chart(stats_df.set_index("Team")['Total'])
-        st.write("**Points Breakdown by Position**")
         st.dataframe(stats_df.set_index("Team"), use_container_width=True)
+
+if is_draft_complete:
+    with tabs[4]:
+        st.header("🏆 Final League Rosters")
+        for i in range(1, num_teams + 1):
+            with st.expander(f"📍 {get_team_name(i)}"):
+                t_picks = [d for d in st.session_state.draft_history if d['team'] == i]
+                st.table(pd.DataFrame(t_picks)[['player', 'assigned_pos', 'pick']])
