@@ -83,10 +83,8 @@ def get_team_name(tid):
 def check_roster_limit(chosen_pos, team_id, p, history_list):
     team_picks = [d for d in history_list if d['team'] == team_id]
     current_count = sum(1 for p_pick in team_picks if p_pick.get('assigned_pos') == chosen_pos)
-    # STRICT RULE: No more than 2 RUCs total per team
     if chosen_pos == "RUC":
         return current_count < 2
-    # Other positions: Field limit + 2 bench slots
     return current_count < (p.get(chosen_pos, 0) + 2)
 
 # --- 3. PAGE ROUTING ---
@@ -105,14 +103,14 @@ elif st.session_state.step == "settings":
         st.write("**Target Roster**")
         d_r = st.number_input("DEF", value=st.session_state.params["DEF"])
         m_r = st.number_input("MID", value=st.session_state.params["MID"])
-        r_r = st.number_input("RUC", value=st.session_state.params["RUC"], max_value=2) # Hard cap for settings
+        r_r = st.number_input("RUC", value=2, disabled=True) 
         f_r = st.number_input("FWD", value=st.session_state.params["FWD"])
     st.divider()
     for i in range(1, n_teams + 1):
         existing = st.session_state.team_names.get(str(i), f"Team {i}")
         st.session_state.team_names[str(i)] = st.text_input(f"Slot {i} Name", value=existing)
     if st.button("Start Draft", type="primary", use_container_width=True):
-        st.session_state.params = {"num_teams": n_teams, "my_slot": m_slot, "DEF": d_r, "MID": m_r, "RUC": r_r, "FWD": f_r}
+        st.session_state.params = {"num_teams": n_teams, "my_slot": m_slot, "DEF": d_r, "MID": m_r, "RUC": 2, "FWD": f_r}
         st.session_state.step = "draft"; save_state(); st.rerun()
 
 elif st.session_state.step == "draft":
@@ -130,9 +128,13 @@ elif st.session_state.step == "draft":
     taken_names = [d['player'] for d in st.session_state.draft_history]
     avail_df = df[~df['full_name'].isin(taken_names)].copy()
 
+    tab_list = ["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis"]
     if is_complete:
-        st.success("🎊 DRAFT COMPLETE!")
-    else:
+        tab_list.append("🏆 Final Teams")
+    
+    tabs = st.tabs(tab_list)
+
+    if not is_complete:
         st.subheader(f"⏱️ Now Picking: {get_team_name(active_id)}")
         act_c1, act_c2 = st.columns([1, 2])
         with act_c1:
@@ -165,41 +167,21 @@ elif st.session_state.step == "draft":
                 st.session_state.draft_history.append({"pick": curr_p_num, "team": active_id, "player": sel, "assigned_pos": conf_pos})
                 save_state(); st.rerun()
 
-        if not avail_df.empty:
-            active_pks = [d for d in st.session_state.draft_history if d['team'] == active_id]
-            counts = {pos: sum(1 for d in active_pks if d['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
-            costs = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
-            for pos in costs:
-                pool = avail_df[avail_df['positions'].str.contains(pos, na=False)].sort_values('Power_Rating', ascending=False)
-                if len(pool) > (p['num_teams'] + 2): costs[pos] = pool.iloc[0]['Power_Rating'] - pool.iloc[p['num_teams']+2]['Power_Rating']
-            avail_df['Opt_Score'] = avail_df.apply(lambda row: max([row['Power_Rating'] + (costs.get(x, 0) * 0.4) + (5.0 if counts[x] < p[x] else -25.0) for x in row['positions'].split('/') if check_roster_limit(x, active_id, p, st.session_state.draft_history)] + [-999]), axis=1)
-            top_3 = avail_df[avail_df['Opt_Score'] > -500].sort_values('Opt_Score', ascending=False).head(3)
-            rec_text = " / ".join([f"**{i+1}. {r['full_name']}** ({r['positions']})" for i, r in top_3.iterrows()])
-            st.markdown(f"<p style='font-size: 0.85rem; color: #666;'>💡 Recommended: {rec_text}</p>", unsafe_allow_html=True)
-
-    tabs = st.tabs(["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis"] + (["🏆 Final Teams"] if is_complete else []))
-    
+    # Tab Rendering Logic
     with tabs[0]:
         if is_complete: st.info("Draft Complete.")
         else:
             search = st.text_input("🔍 Filter Board:", "")
             disp = avail_df.copy()
             if search: disp = disp[disp['full_name'].str.contains(search, case=False)]
-            if not disp.empty and 'Opt_Score' in disp.columns:
-                disp = disp.sort_values('Opt_Score', ascending=False)
-                disp['Score'] = disp['Opt_Score'].apply(lambda x: "FULL" if x <= -500 else round(x, 1))
-                st.dataframe(disp[['full_name', 'positions', 'Score', 'Avg', 'Risk_Profile', 'gamesPlayed']].head(100), use_container_width=True, hide_index=True)
-            st.divider()
-            cols = st.columns(4)
-            for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
-                rem = p[pos] - counts[pos]
-                cols[i].metric(pos, f"{counts[pos]}/{p[pos]}", delta=f"-{rem}" if rem > 0 else "FULL", delta_color="inverse" if rem > 0 else "normal")
+            st.dataframe(disp[['full_name', 'positions', 'Avg', 'Risk_Profile', 'gamesPlayed']].head(100), use_container_width=True, hide_index=True)
 
     with tabs[1]:
         my_pks = [d for d in st.session_state.draft_history if d['team'] == p['my_slot']]
         if my_pks:
             inf_cols = st.columns(5)
             on_f, bnch, trk = {x: [] for x in ['DEF', 'MID', 'RUC', 'FWD']}, [], {x: 0 for x in ['DEF', 'MID', 'RUC', 'FWD']}
+            # Ensure high scorers are listed on field in the UI
             sorted_my_pks = sorted(my_pks, key=lambda x: df[df['full_name']==x['player']]['Avg'].values[0] if not df[df['full_name']==x['player']].empty else 0, reverse=True)
             for pk in sorted_my_pks:
                 if trk[pk['assigned_pos']] < p[pk['assigned_pos']]:
@@ -220,36 +202,33 @@ elif st.session_state.step == "draft":
         all_t = []
         for i in range(1, p['num_teams'] + 1):
             t_pks = [d for d in st.session_state.draft_history if d['team'] == i]
-            all_t.append({"Team": get_team_name(i), "Total": df[df['full_name'].isin([x['player'] for x in t_pks])]['Avg'].sum()})
+            all_t.append({"Team": get_team_name(i), "Total": round(df[df['full_name'].isin([x['player'] for x in t_pks])]['Avg'].sum(), 1)})
         if all_t: st.bar_chart(pd.DataFrame(all_t).set_index("Team")['Total'])
 
     if is_complete:
         with tabs[4]:
-            st.header("🏆 League Performance Summary")
-            all_stats = []
+            st.header("🏆 Final Team Rankings")
+            summary_data = []
             for i in range(1, p['num_teams'] + 1):
                 t_pks = [d for d in st.session_state.draft_history if d['team'] == i]
-                # Priority Logic: Sort players by Avg to find highest possible on-field score
                 field_pts, total_pts = 0.0, 0.0
+                
                 for pos in ['DEF', 'MID', 'RUC', 'FWD']:
-                    pos_players = [d['player'] for d in t_pks if d['assigned_pos'] == pos]
-                    # Get their average scores and sort descending
-                    p_scores = sorted(df[df['full_name'].isin(pos_players)]['Avg'].tolist(), reverse=True)
+                    pos_list = [d['player'] for d in t_pks if d['assigned_pos'] == pos]
+                    p_scores = sorted(df[df['full_name'].isin(pos_list)]['Avg'].tolist(), reverse=True)
+                    
                     limit = p[pos]
                     field_pts += sum(p_scores[:limit])
                     total_pts += sum(p_scores)
                 
-                all_stats.append({
-                    "Team": get_team_name(i),
+                summary_data.append({
+                    "Team Name": get_team_name(i),
                     "On-Field Points": round(field_pts, 1),
-                    "Full Squad Points": round(total_pts, 1),
-                    "Field/Bench Gap": round(total_pts - field_pts, 1)
+                    "Full Squad Points": round(total_pts, 1)
                 })
             
-            st.table(pd.DataFrame(all_stats).sort_values("On-Field Points", ascending=False))
-            
+            st.table(pd.DataFrame(summary_data).sort_values("On-Field Points", ascending=False))
             st.divider()
-            st.subheader("Roster Lists")
             for i in range(1, p['num_teams'] + 1):
-                with st.expander(f"📍 {get_team_name(i)}"):
+                with st.expander(f"📍 {get_team_name(i)} Roster"):
                     st.dataframe(pd.DataFrame([d for d in st.session_state.draft_history if d['team'] == i])[['pick', 'player', 'assigned_pos']], hide_index=True)
