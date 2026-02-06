@@ -46,6 +46,7 @@ def load_data():
             df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
         
         def calculate_custom_power(row):
+            # 90% Weight on Avg
             score = (row['Avg'] * 0.9) + (row['Last3_Avg'] * 0.05)
             if 'DEF' in row['positions']: score += (row['KickInAvg'] * 0.2)
             return round(score, 1)
@@ -81,7 +82,6 @@ def get_team_name(tid):
 def check_roster_limit(chosen_pos, team_id, user_inputs, history_list):
     team_picks = [d for d in history_list if d['team'] == team_id]
     current_count = sum(1 for p in team_picks if p.get('assigned_pos') == chosen_pos)
-    # Limit is core requirement + 2 extra bench slots per position
     return current_count < (user_inputs.get(chosen_pos, 0) + 2)
 
 # --- 3. SIDEBAR ---
@@ -113,11 +113,6 @@ with st.sidebar:
     active_name = get_team_name(active_team_id)
     st.subheader(f"Turn: {active_name}")
     
-    col_s1, col_s2 = st.columns(2)
-    if col_s1.button("💾 Save"): save_state()
-    if col_s2.button("🔄 Recover"): load_state()
-    if st.button("🚨 RESET DRAFT", use_container_width=True): reset_draft()
-    
     if st.button("🤖 Sim to My Turn", use_container_width=True):
         while True:
             curr_p = len(st.session_state.draft_history) + 1
@@ -140,6 +135,12 @@ with st.sidebar:
         save_state(); st.rerun()
 
     st.divider()
+    col_s1, col_s2 = st.columns(2)
+    if col_s1.button("💾 Save"): save_state()
+    if col_s2.button("🔄 Recover"): load_state()
+    if st.button("🚨 RESET DRAFT", use_container_width=True): reset_draft()
+    
+    st.divider()
     taken_names = [d['player'] for d in st.session_state.draft_history]
     avail_list = sorted(df[~df['full_name'].isin(taken_names)]['full_name'].tolist()) if not df.empty else []
     selected = st.selectbox("Record Pick:", [""] + avail_list)
@@ -157,7 +158,7 @@ with st.sidebar:
         st.session_state.draft_history.append({"pick": curr_p_num, "team": active_team_id, "player": selected, "assigned_pos": assigned_pos})
         save_state(); st.rerun()
 
-# --- 4. OPTIMIZER LOGIC ---
+# --- 4. CALCULATIONS & FIXES ---
 if not df.empty:
     avail_df = df[~df['full_name'].isin(taken_names)].copy()
     active_picks = [d for d in st.session_state.draft_history if d['team'] == active_team_id]
@@ -189,17 +190,21 @@ t1, t2, t3, t4 = st.tabs(["🎯 Big Board", "📋 My Team", "📈 Log", "📊 An
 with t1:
     search_q = st.text_input("🔍 Search Player:", "")
     display_df = avail_df.copy()
-    if search_q: display_df = display_df[display_df['full_name'].str.contains(search_q, case=False)]
+    if search_q: 
+        display_df = display_df[display_df['full_name'].str.contains(search_q, case=False)]
     
-    # Format the score to handle "Full" positions
-    display_df['Score_Display'] = display_df['Optimizer_Score'].apply(lambda x: "POS FULL" if x <= -500 else round(x, 1))
+    if not display_df.empty:
+        # We handle sorting BEFORE adding the display label to avoid the KeyError
+        display_df = display_df.sort_values('Optimizer_Score', ascending=False)
+        display_df['Score_Display'] = display_df['Optimizer_Score'].apply(lambda x: "POS FULL" if x <= -500 else round(x, 1))
+        
+        st.dataframe(
+            display_df[['full_name', 'positions', 'Score_Display', 'Avg', 'Risk_Profile', 'gamesPlayed']].head(400), 
+            use_container_width=True, hide_index=True, height=600
+        )
+    else:
+        st.write("No players available matching criteria.")
     
-    st.dataframe(
-        display_df[['full_name', 'positions', 'Score_Display', 'Avg', 'Risk_Profile', 'gamesPlayed']].sort_values('Optimizer_Score', ascending=False).head(400), 
-        use_container_width=True, hide_index=True, height=600
-    )
-    
-    # NEW: Remaining Position Counter
     st.divider()
     st.subheader(f"Roster Status: {active_name}")
     cols = st.columns(4)
@@ -213,19 +218,16 @@ with t2:
     my_picks = [d for d in st.session_state.draft_history if d['team'] == my_slot]
     if my_picks:
         total_team_avg = round(df[df['full_name'].isin([p['player'] for p in my_picks])]['Avg'].sum(), 1)
-        st.subheader(f"{get_team_name(my_slot)} | Projected Score: {total_team_avg}")
+        st.subheader(f"{get_team_name(my_slot)} | Total Score: {total_team_avg}")
         
-        # NEW: Team Infographic Sorted by Category
+        # INFOGRAPHIC
         st.markdown("### 🏟️ Team Infographic")
         info_cols = st.columns(5)
         categories = ['DEF', 'MID', 'RUC', 'FWD', 'Bench']
-        
-        # Logic to separate on-field and bench
         on_field = {pos: [] for pos in ['DEF', 'MID', 'RUC', 'FWD']}
         bench_list = []
-        
-        # Track counts to determine who is bench
         tracking_counts = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
+        
         for p in my_picks:
             pos = p['assigned_pos']
             if tracking_counts[pos] < user_inputs[pos]:
@@ -238,9 +240,7 @@ with t2:
             with info_cols[i]:
                 st.write(f"**{cat}**")
                 players = on_field[cat] if cat != 'Bench' else bench_list
-                if players:
-                    for name in players: st.info(name)
-                else: st.caption("Empty")
+                for name in players: st.info(name)
     else: st.info("Draft players to see your squad.")
 
 with t3:
@@ -250,7 +250,21 @@ with t3:
         st.dataframe(log_df[['pick', 'team_name', 'player', 'assigned_pos']].sort_values('pick', ascending=False), use_container_width=True, hide_index=True)
 
 with t4:
-    team_stats = [{"Team": get_team_name(i), "Total Avg": df[df['full_name'].isin([d['player'] for d in st.session_state.draft_history if d['team'] == i])]['Avg'].sum()} for i in range(1, num_teams+1)]
-    if team_stats:
-        st.subheader("League Standings")
-        st.bar_chart(pd.DataFrame(team_stats).set_index("Team"))
+    st.subheader("League Analysis")
+    all_teams_data = []
+    for i in range(1, num_teams + 1):
+        t_picks = [d for d in st.session_state.draft_history if d['team'] == i]
+        t_df = df[df['full_name'].isin([p['player'] for p in t_picks])]
+        
+        row = {"Team": get_team_name(i), "Total": t_df['Avg'].sum()}
+        for pos in ['DEF', 'MID', 'RUC', 'FWD']:
+            # Calculate points per position based on assigned role
+            pos_players = [p['player'] for p in t_picks if p['assigned_pos'] == pos]
+            row[pos] = df[df['full_name'].isin(pos_players)]['Avg'].sum()
+        all_teams_data.append(row)
+    
+    if all_teams_data:
+        stats_df = pd.DataFrame(all_teams_data)
+        st.bar_chart(stats_df.set_index("Team")['Total'])
+        st.write("**Points Breakdown by Position**")
+        st.dataframe(stats_df.set_index("Team"), use_container_width=True)
