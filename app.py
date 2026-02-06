@@ -9,6 +9,7 @@ st.set_page_config(page_title="Supercoach War Room 2026", layout="wide", initial
 SAVE_FILE = "draft_state.json"
 
 def save_state():
+    """Saves current progress to a local JSON file."""
     with open(SAVE_FILE, "w") as f:
         json.dump({
             "draft_history": st.session_state.draft_history, 
@@ -16,14 +17,14 @@ def save_state():
             "team_names": st.session_state.team_names
         }, f)
 
-def load_state():
+def load_state_logic():
+    """Logic to pull data from file into session state."""
     if os.path.exists(SAVE_FILE):
         with open(SAVE_FILE, "r") as f:
             state = json.load(f)
             st.session_state.draft_history = state.get("draft_history", [])
             st.session_state.my_team = state.get("my_team", [])
             st.session_state.team_names = state.get("team_names", {})
-        st.rerun()
 
 def reset_draft():
     st.session_state.draft_history = []
@@ -32,6 +33,15 @@ def reset_draft():
     if os.path.exists(SAVE_FILE):
         os.remove(SAVE_FILE)
     st.rerun()
+
+# --- INITIALIZE & AUTO-LOAD ---
+if 'draft_history' not in st.session_state:
+    # This block runs only once per session start
+    load_state_logic()
+    # If after loading it's still empty, initialize properly
+    if 'draft_history' not in st.session_state: st.session_state.draft_history = []
+    if 'my_team' not in st.session_state: st.session_state.my_team = []
+    if 'team_names' not in st.session_state: st.session_state.team_names = {}
 
 @st.cache_data
 def load_data():
@@ -62,11 +72,6 @@ def load_data():
         st.error(f"Error loading CSV: {e}")
         return pd.DataFrame()
 
-# Session State Init
-if 'draft_history' not in st.session_state: st.session_state.draft_history = []
-if 'my_team' not in st.session_state: st.session_state.my_team = []
-if 'team_names' not in st.session_state: st.session_state.team_names = {}
-
 df = load_data()
 
 # --- 2. HELPERS ---
@@ -84,14 +89,7 @@ def check_roster_limit(chosen_pos, team_id, user_inputs, history_list):
     current_count = sum(1 for p in team_picks if p.get('assigned_pos') == chosen_pos)
     return current_count < (user_inputs.get(chosen_pos, 0) + 2)
 
-# --- 3. DRAFT COMPLETION LOGIC ---
-total_required_per_team = sum(user_inputs.values()) + (len(user_inputs) * 2) if 'user_inputs' in locals() else 0
-# Dynamic check
-is_draft_complete = False
-if not df.empty and 'num_teams' in locals():
-    is_draft_complete = len(st.session_state.draft_history) >= (num_teams * total_required_per_team)
-
-# --- 4. SIDEBAR ---
+# --- 3. SIDEBAR ---
 with st.sidebar:
     st.title("🛡️ Command Center")
     num_teams = st.number_input("Total Teams", value=10, min_value=1)
@@ -102,7 +100,9 @@ with st.sidebar:
             key = str(i)
             existing_name = st.session_state.team_names.get(key, f"Team {i}")
             new_name = st.text_input(f"Slot {i}", value=existing_name, key=f"tn_{i}")
-            st.session_state.team_names[key] = new_name
+            if new_name != existing_name:
+                st.session_state.team_names[key] = new_name
+                save_state() # Auto-save name changes
 
     st.divider()
     st.write("**Target Roster (On-Field)**")
@@ -115,18 +115,18 @@ with st.sidebar:
     }
     
     st.divider()
-    col_s1, col_s2 = st.columns(2)
-    if col_s1.button("💾 Save"): save_state()
-    if col_s2.button("🔄 Recover"): load_state()
     if st.button("🚨 RESET DRAFT", use_container_width=True): reset_draft()
 
-# --- 5. TOP ACTION AREA (ABOVE TABS) ---
+# --- 4. TOP ACTION AREA ---
 curr_p_num = len(st.session_state.draft_history) + 1
 active_team_id = get_current_turn(curr_p_num, num_teams)
 active_name = get_team_name(active_team_id)
 
+total_required_per_team = sum(user_inputs.values()) + (len(user_inputs) * 2)
+is_draft_complete = len(st.session_state.draft_history) >= (num_teams * total_required_per_team)
+
 if is_draft_complete:
-    st.success("🎊 DRAFT COMPLETE! View all rosters in the 'Final Teams' tab.")
+    st.success("🎊 DRAFT COMPLETE! Final rosters are locked and saved.")
 else:
     st.subheader(f"⏱️ Now Picking: {active_name}")
     act_col1, act_col2 = st.columns([1, 2])
@@ -151,12 +151,12 @@ else:
                 if ai_choice:
                     st.session_state.draft_history.append({"pick": curr_p, "team": turn, "player": ai_choice, "assigned_pos": ai_pos})
                 else: break
-            save_state(); st.rerun()
+            save_state() # AUTO-SAVE after simulation
+            st.rerun()
 
     with act_col2:
         taken_names = [d['player'] for d in st.session_state.draft_history]
         avail_list = sorted(df[~df['full_name'].isin(taken_names)]['full_name'].tolist()) if not df.empty else []
-        
         r_col1, r_col2, r_col3 = st.columns([2, 1, 1])
         selected = r_col1.selectbox("Select Player:", [""] + avail_list, label_visibility="collapsed")
         
@@ -170,12 +170,12 @@ else:
         
         if r_col3.button("CONFIRM", type="primary", disabled=not can_confirm, use_container_width=True):
             st.session_state.draft_history.append({"pick": curr_p_num, "team": active_team_id, "player": selected, "assigned_pos": assigned_pos})
-            save_state(); st.rerun()
+            save_state() # AUTO-SAVE after manual pick
+            st.rerun()
 
-    # RECOMMENDATIONS AREA
+    # Recommendations
     if not df.empty:
         avail_df = df[~df['full_name'].isin(taken_names)].copy()
-        # Optimizer Logic (Same as before)
         active_picks = [d for d in st.session_state.draft_history if d['team'] == active_team_id]
         counts = {pos: sum(1 for p in active_picks if p['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
         costs = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
@@ -184,29 +184,25 @@ else:
             if len(pool) > (num_teams + 2): costs[pos] = pool.iloc[0]['Power_Rating'] - pool.iloc[num_teams+2]['Power_Rating']
         
         avail_df['Optimizer_Score'] = avail_df.apply(lambda row: max([row['Power_Rating'] + (costs.get(p, 0) * 0.4) + (5.0 if counts[p] < user_inputs[p] else -25.0) for p in row['positions'].split('/') if check_roster_limit(p, active_team_id, user_inputs, st.session_state.draft_history)] + [-999]), axis=1)
-        
         top_3 = avail_df[avail_df['Optimizer_Score'] > -500].sort_values('Optimizer_Score', ascending=False).head(3)
-        
         rec_text = " / ".join([f"**{i+1}. {r['full_name']}** ({r['positions']})" for i, r in top_3.iterrows()])
         st.markdown(f"<p style='font-size: 0.85rem; color: #666;'>💡 Recommended: {rec_text}</p>", unsafe_allow_html=True)
 
-# --- 6. TABS ---
+# --- 5. TABS ---
 tab_list = ["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis"]
 if is_draft_complete: tab_list.append("🏆 Final Teams")
 tabs = st.tabs(tab_list)
 
+# (Tabs logic remains identical to previous stable version to preserve features)
 with tabs[0]:
     search_q = st.text_input("🔍 Filter Board:", "")
     display_df = avail_df.copy()
     if search_q: display_df = display_df[display_df['full_name'].str.contains(search_q, case=False)]
-    
     if not display_df.empty:
         display_df = display_df.sort_values('Optimizer_Score', ascending=False)
         display_df['Score'] = display_df['Optimizer_Score'].apply(lambda x: "FULL" if x <= -500 else round(x, 1))
         st.dataframe(display_df[['full_name', 'positions', 'Score', 'Avg', 'Risk_Profile', 'gamesPlayed']].head(200), use_container_width=True, hide_index=True)
-    
     st.divider()
-    st.caption(f"Remaining Slots for {active_name}:")
     c_cols = st.columns(4)
     for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
         rem = user_inputs[pos] - counts[pos]
@@ -217,15 +213,12 @@ with tabs[1]:
     if my_picks:
         st.subheader(f"🏟️ {get_team_name(my_slot)} Infographic")
         info_cols = st.columns(5)
-        on_field = {pos: [] for pos in ['DEF', 'MID', 'RUC', 'FWD']}
-        bench = []
-        tracking = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
+        on_field, bench, tracking = {p: [] for p in ['DEF', 'MID', 'RUC', 'FWD']}, [], {p: 0 for p in ['DEF', 'MID', 'RUC', 'FWD']}
         for p in my_picks:
             if tracking[p['assigned_pos']] < user_inputs[p['assigned_pos']]:
                 on_field[p['assigned_pos']].append(p['player'])
                 tracking[p['assigned_pos']] += 1
             else: bench.append(f"{p['player']} ({p['assigned_pos']})")
-        
         for i, cat in enumerate(['DEF', 'MID', 'RUC', 'FWD', 'Bench']):
             with info_cols[i]:
                 st.write(f"**{cat}**")
