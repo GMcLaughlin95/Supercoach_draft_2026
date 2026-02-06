@@ -46,16 +46,14 @@ def load_data():
             df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
         
         def calculate_custom_power(row):
-            # 90% WEIGHT ON AVG: Maximizing the raw score focus as requested
             score = (row['Avg'] * 0.9) + (row['Last3_Avg'] * 0.05)
-            # Minimal role adjustment for tie-breaking
             if 'DEF' in row['positions']: score += (row['KickInAvg'] * 0.2)
             return round(score, 1)
 
         def get_risk_profile(games):
-            if games >= 18: return "🟢 Low (Durable)"
-            if games >= 12: return "🟡 Moderate (Caution)"
-            return "🔴 High (Injury/Sample)"
+            if games >= 18: return "🟢 Low"
+            if games >= 12: return "🟡 Mod"
+            return "🔴 High"
 
         df['Power_Rating'] = df.apply(calculate_custom_power, axis=1)
         df['Risk_Profile'] = df['gamesPlayed'].apply(get_risk_profile)
@@ -83,6 +81,7 @@ def get_team_name(tid):
 def check_roster_limit(chosen_pos, team_id, user_inputs, history_list):
     team_picks = [d for d in history_list if d['team'] == team_id]
     current_count = sum(1 for p in team_picks if p.get('assigned_pos') == chosen_pos)
+    # Limit is core requirement + 2 extra bench slots per position
     return current_count < (user_inputs.get(chosen_pos, 0) + 2)
 
 # --- 3. SIDEBAR ---
@@ -99,7 +98,7 @@ with st.sidebar:
             st.session_state.team_names[key] = new_name
 
     st.divider()
-    st.write("**Target Roster**")
+    st.write("**Target Roster (On-Field)**")
     c_req1, c_req2 = st.columns(2)
     user_inputs = {
         'DEF': c_req1.number_input("DEF", value=6, min_value=0),
@@ -158,64 +157,91 @@ with st.sidebar:
         st.session_state.draft_history.append({"pick": curr_p_num, "team": active_team_id, "player": selected, "assigned_pos": assigned_pos})
         save_state(); st.rerun()
 
-# --- 4. OPTIMIZER SCORE (90% AVG BASED) ---
+# --- 4. OPTIMIZER LOGIC ---
 if not df.empty:
     avail_df = df[~df['full_name'].isin(taken_names)].copy()
     active_picks = [d for d in st.session_state.draft_history if d['team'] == active_team_id]
     counts = {pos: sum(1 for p in active_picks if p['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
     
     lookahead = num_teams + 2
-    costs = {}
-    for pos in ['DEF', 'MID', 'RUC', 'FWD']:
+    costs = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
+    for pos in costs:
         pool = avail_df[avail_df['positions'].str.contains(pos, na=False)].sort_values('Power_Rating', ascending=False)
-        if len(pool) > lookahead:
-            costs[pos] = pool.iloc[0]['Power_Rating'] - pool.iloc[lookahead]['Power_Rating']
-        elif not pool.empty:
-            costs[pos] = pool.iloc[0]['Power_Rating'] - pool.iloc[-1]['Power_Rating']
-        else: costs[pos] = 0
+        if len(pool) > lookahead: costs[pos] = pool.iloc[0]['Power_Rating'] - pool.iloc[lookahead]['Power_Rating']
 
-    def calculate_optimizer_score(row):
+    def calculate_display_score(row):
         pos_list = row['positions'].split('/')
         best_val = -999.0
         for p in pos_list:
             if not check_roster_limit(p, active_team_id, user_inputs, st.session_state.draft_history): continue
-            # Opportunity cost acts only as a slight modifier to the raw Power Rating
             v = row['Power_Rating'] + (costs.get(p, 0) * 0.4)
             if counts[p] < user_inputs[p]: v += 5.0
             else: v -= 25.0
             if v > best_val: best_val = v
-        return round(best_val, 1)
+        return best_val
 
-    avail_df['Optimizer_Score'] = avail_df.apply(calculate_optimizer_score, axis=1)
+    avail_df['Optimizer_Score'] = avail_df.apply(calculate_display_score, axis=1)
 else: avail_df = pd.DataFrame()
 
 # --- 5. TABS ---
 t1, t2, t3, t4 = st.tabs(["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis"])
 
 with t1:
-    if not avail_df.empty:
-        rec = avail_df.sort_values('Optimizer_Score', ascending=False).iloc[0]
-        st.markdown(f"### 🎯 Recommended: **{rec['full_name']}**")
-        st.caption(f"Reasoning: High Raw Avg ({rec['Avg']}) with durability risk rated as {rec['Risk_Profile']}.")
-        st.divider()
-    
     search_q = st.text_input("🔍 Search Player:", "")
     display_df = avail_df.copy()
     if search_q: display_df = display_df[display_df['full_name'].str.contains(search_q, case=False)]
     
-    # NEW: Table includes Risk Profile
+    # Format the score to handle "Full" positions
+    display_df['Score_Display'] = display_df['Optimizer_Score'].apply(lambda x: "POS FULL" if x <= -500 else round(x, 1))
+    
     st.dataframe(
-        display_df[['full_name', 'positions', 'Optimizer_Score', 'Avg', 'Risk_Profile', 'gamesPlayed']].sort_values('Optimizer_Score', ascending=False).head(400), 
-        use_container_width=True, hide_index=True, height=700
+        display_df[['full_name', 'positions', 'Score_Display', 'Avg', 'Risk_Profile', 'gamesPlayed']].sort_values('Optimizer_Score', ascending=False).head(400), 
+        use_container_width=True, hide_index=True, height=600
     )
+    
+    # NEW: Remaining Position Counter
+    st.divider()
+    st.subheader(f"Roster Status: {active_name}")
+    cols = st.columns(4)
+    for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
+        rem = user_inputs[pos] - counts[pos]
+        label = f"**{pos}:** {counts[pos]}/{user_inputs[pos]}"
+        if rem > 0: cols[i].warning(f"{label} (Need {rem})")
+        else: cols[i].success(f"{label} (Bench Mode)")
 
 with t2:
     my_picks = [d for d in st.session_state.draft_history if d['team'] == my_slot]
     if my_picks:
         total_team_avg = round(df[df['full_name'].isin([p['player'] for p in my_picks])]['Avg'].sum(), 1)
         st.subheader(f"{get_team_name(my_slot)} | Projected Score: {total_team_avg}")
-        st.table(pd.DataFrame(my_picks)[['player', 'assigned_pos', 'pick']])
-    else: st.info("Draft players to see your projected score.")
+        
+        # NEW: Team Infographic Sorted by Category
+        st.markdown("### 🏟️ Team Infographic")
+        info_cols = st.columns(5)
+        categories = ['DEF', 'MID', 'RUC', 'FWD', 'Bench']
+        
+        # Logic to separate on-field and bench
+        on_field = {pos: [] for pos in ['DEF', 'MID', 'RUC', 'FWD']}
+        bench_list = []
+        
+        # Track counts to determine who is bench
+        tracking_counts = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
+        for p in my_picks:
+            pos = p['assigned_pos']
+            if tracking_counts[pos] < user_inputs[pos]:
+                on_field[pos].append(p['player'])
+                tracking_counts[pos] += 1
+            else:
+                bench_list.append(f"{p['player']} ({pos})")
+        
+        for i, cat in enumerate(categories):
+            with info_cols[i]:
+                st.write(f"**{cat}**")
+                players = on_field[cat] if cat != 'Bench' else bench_list
+                if players:
+                    for name in players: st.info(name)
+                else: st.caption("Empty")
+    else: st.info("Draft players to see your squad.")
 
 with t3:
     if st.session_state.draft_history:
