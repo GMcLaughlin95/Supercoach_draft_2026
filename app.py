@@ -103,14 +103,14 @@ elif st.session_state.step == "settings":
         st.write("**Target Roster**")
         d_r = st.number_input("DEF", value=st.session_state.params["DEF"])
         m_r = st.number_input("MID", value=st.session_state.params["MID"])
-        r_r = st.number_input("RUC", value=st.session_state.params["RUC"], max_value=2)
+        r_r = st.number_input("RUC", value=2, max_value=2) # Enforced constraint
         f_r = st.number_input("FWD", value=st.session_state.params["FWD"])
     st.divider()
     for i in range(1, n_teams + 1):
         existing = st.session_state.team_names.get(str(i), f"Team {i}")
         st.session_state.team_names[str(i)] = st.text_input(f"Slot {i} Name", value=existing)
     if st.button("Start Draft", type="primary", use_container_width=True):
-        st.session_state.params = {"num_teams": n_teams, "my_slot": m_slot, "DEF": d_r, "MID": m_r, "RUC": r_r, "FWD": f_r}
+        st.session_state.params = {"num_teams": n_teams, "my_slot": m_slot, "DEF": d_r, "MID": m_r, "RUC": 2, "FWD": f_r}
         st.session_state.step = "draft"; save_state(); st.rerun()
 
 elif st.session_state.step == "draft":
@@ -122,8 +122,10 @@ elif st.session_state.step == "draft":
 
     curr_p_num = len(st.session_state.draft_history) + 1
     active_id = get_current_turn(curr_p_num, p['num_teams'])
-    total_slots = sum([p['DEF'], p['MID'], p['RUC'], p['FWD']]) + 8
-    is_complete = len(st.session_state.draft_history) >= (p['num_teams'] * total_slots)
+    
+    # Each team picks: Target Roster + 8 Bench slots
+    total_slots_per_team = sum([p['DEF'], p['MID'], p['RUC'], p['FWD']]) + 8
+    is_complete = len(st.session_state.draft_history) >= (p['num_teams'] * total_slots_per_team)
 
     taken_names = [d['player'] for d in st.session_state.draft_history]
     avail_df = df[~df['full_name'].isin(taken_names)].copy()
@@ -138,7 +140,7 @@ elif st.session_state.step == "draft":
                 while True:
                     cp = len(st.session_state.draft_history) + 1
                     tn = get_current_turn(cp, p['num_teams'])
-                    if tn == p['my_slot']: break
+                    if tn == p['my_slot'] or len(st.session_state.draft_history) >= (p['num_teams'] * total_slots_per_team): break
                     tkn = [d['player'] for d in st.session_state.draft_history]
                     av_sim = df[~df['full_name'].isin(tkn)].sort_values('Power_Rating', ascending=False)
                     if av_sim.empty: break
@@ -163,18 +165,6 @@ elif st.session_state.step == "draft":
                 st.session_state.draft_history.append({"pick": curr_p_num, "team": active_id, "player": sel, "assigned_pos": conf_pos})
                 save_state(); st.rerun()
 
-        if not avail_df.empty:
-            active_pks = [d for d in st.session_state.draft_history if d['team'] == active_id]
-            counts = {pos: sum(1 for d in active_pks if d['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
-            costs = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
-            for pos in costs:
-                pool = avail_df[avail_df['positions'].str.contains(pos, na=False)].sort_values('Power_Rating', ascending=False)
-                if len(pool) > (p['num_teams'] + 2): costs[pos] = pool.iloc[0]['Power_Rating'] - pool.iloc[p['num_teams']+2]['Power_Rating']
-            avail_df['Opt_Score'] = avail_df.apply(lambda row: max([row['Power_Rating'] + (costs.get(x, 0) * 0.4) + (5.0 if counts[x] < p[x] else -25.0) for x in row['positions'].split('/') if check_roster_limit(x, active_id, p, st.session_state.draft_history)] + [-999]), axis=1)
-            top_3 = avail_df[avail_df['Opt_Score'] > -500].sort_values('Opt_Score', ascending=False).head(3)
-            rec_text = " / ".join([f"**{i+1}. {r['full_name']}** ({r['positions']})" for i, r in top_3.iterrows()])
-            st.markdown(f"<p style='font-size: 0.85rem; color: #666;'>💡 Recommended: {rec_text}</p>", unsafe_allow_html=True)
-
     # --- TABS ---
     tabs = st.tabs(["🎯 Big Board", "📋 My Team", "📈 Log", "📊 Analysis"] + (["🏆 Final Teams"] if is_complete else []))
     
@@ -184,15 +174,8 @@ elif st.session_state.step == "draft":
             search = st.text_input("🔍 Filter Board:", "")
             disp = avail_df.copy()
             if search: disp = disp[disp['full_name'].str.contains(search, case=False)]
-            if not disp.empty and 'Opt_Score' in disp.columns:
-                disp = disp.sort_values('Opt_Score', ascending=False)
-                disp['Score'] = disp['Opt_Score'].apply(lambda x: "FULL" if x <= -500 else round(x, 1))
-                st.dataframe(disp[['full_name', 'positions', 'Score', 'Avg', 'Risk_Profile', 'gamesPlayed']].head(100), use_container_width=True, hide_index=True)
-            st.divider()
-            cols = st.columns(4)
-            for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
-                rem = p[pos] - counts[pos]
-                cols[i].metric(pos, f"{counts[pos]}/{p[pos]}", delta=f"-{rem}" if rem > 0 else "FULL", delta_color="inverse" if rem > 0 else "normal")
+            if not disp.empty and 'Power_Rating' in disp.columns:
+                st.dataframe(disp[['full_name', 'positions', 'Power_Rating', 'Avg', 'Risk_Profile', 'gamesPlayed']].head(100), use_container_width=True, hide_index=True)
 
     with tabs[1]:
         my_pks = [d for d in st.session_state.draft_history if d['team'] == p['my_slot']]
@@ -228,13 +211,13 @@ elif st.session_state.step == "draft":
             for i in range(1, p['num_teams'] + 1):
                 t_pks = [d for d in st.session_state.draft_history if d['team'] == i]
                 
-                # Amendment: Calculate Fielded vs Full Squad with Priority Logic
                 on_field_total = 0.0
                 full_squad_total = 0.0
                 
+                # Priority Allocation Logic
                 for pos in ['DEF', 'MID', 'RUC', 'FWD']:
                     pos_list = [d['player'] for d in t_pks if d['assigned_pos'] == pos]
-                    # Get their scores and sort high to low to fill field first
+                    # Sort players by Avg descending to pick highest scorers for field first
                     scores = sorted(df[df['full_name'].isin(pos_list)]['Avg'].tolist(), reverse=True)
                     
                     limit = p[pos]
@@ -242,15 +225,16 @@ elif st.session_state.step == "draft":
                     full_squad_total += sum(scores)
                 
                 all_stats.append({
-                    "Team": get_team_name(i), 
-                    "On-Field Points": round(on_field_total, 1), 
-                    "Full Squad Points": round(full_squad_total, 1)
+                    "Team": get_team_name(i),
+                    "Fielded Players Score": round(on_field_total, 1),
+                    "Whole Team Score": round(full_squad_total, 1)
                 })
             
-            st.table(pd.DataFrame(all_stats).sort_values("On-Field Points", ascending=False))
+            # Sort by Fielded Score
+            st.table(pd.DataFrame(all_stats).sort_values("Fielded Players Score", ascending=False))
             
             st.divider()
             st.subheader("Roster Breakdowns")
             for i in range(1, p['num_teams'] + 1):
-                with st.expander(f"📍 {get_team_name(i)} Full List"):
+                with st.expander(f"📍 {get_team_name(i)} Roster"):
                     st.dataframe(pd.DataFrame([d for d in st.session_state.draft_history if d['team'] == i])[['pick', 'player', 'assigned_pos']], hide_index=True)
