@@ -52,6 +52,7 @@ if 'step' not in st.session_state:
 @st.cache_data
 def load_data():
     try:
+        # 1. Load Main Supercoach Stats Data
         df = pd.read_csv('supercoach_data.csv')
         df.columns = [c.strip() for c in df.columns]
         if 'full_name' not in df.columns:
@@ -59,16 +60,58 @@ def load_data():
         cols_to_fix = ['Avg', 'Last3_Avg', 'gamesPlayed', 'KickInAvg', 'CbaAvg']
         for col in cols_to_fix:
             df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
+            
+        # 2. Load Expert Ratings & Parse Format
+        expert_scores = {}
+        try:
+            exp_df = pd.read_csv('Draft Doctor SC Ratings.csv')
+            data_rows = exp_df.iloc[1:].copy() # Drop the first row of headers (Steve/Statesman)
+            data_rows['Rank'] = pd.to_numeric(data_rows['Rank'], errors='coerce')
+            
+            for _, r in data_rows.iterrows():
+                rank = r['Rank']
+                if pd.isna(rank): continue
+                
+                # Check all columns for player names to capture both experts across all positions
+                for col in data_rows.columns:
+                    if col == 'Rank': continue
+                    name = str(r[col]).strip()
+                    if name and name.lower() != 'nan':
+                        # Record their best (lowest) rank
+                        current_best = expert_scores.get(name, 999)
+                        if rank < current_best:
+                            expert_scores[name] = rank
+        except Exception as e:
+            st.warning(f"Note: Could not load 'Draft Doctor SC Ratings.csv'. {e}")
+
+        # Map to main dataframe
+        df['Expert_Rank'] = df['full_name'].map(expert_scores).fillna(999)
         
+        # 3. Enhanced Power Rating calculation
         def calculate_custom_power(row):
-            score = (row['Avg'] * 0.9) + (row['Last3_Avg'] * 0.05)
+            # Base Stats (Weighted down slightly to make room for expert opinion)
+            score = (row['Avg'] * 0.85) + (row['Last3_Avg'] * 0.05)
             if 'DEF' in row['positions']: score += (row['KickInAvg'] * 0.2)
+            
+            # Incorporate Expert Consensus Bonuses
+            exp_rank = row['Expert_Rank']
+            if exp_rank <= 10:
+                score += 12.0
+            elif exp_rank <= 25:
+                score += 8.0
+            elif exp_rank <= 50:
+                score += 4.0
+            elif exp_rank <= 100:
+                score += 1.5
+                
             return round(score, 1)
 
         df['Power_Rating'] = df.apply(calculate_custom_power, axis=1)
         df['Risk_Profile'] = df['gamesPlayed'].apply(lambda x: "🟢 Low" if x >= 18 else ("🟡 Mod" if x >= 12 else "🔴 High"))
         return df
-    except: return pd.DataFrame()
+    except Exception as e: 
+        st.error(f"Error Loading Data: {e}")
+        return pd.DataFrame()
 
 df = load_data()
 
@@ -142,7 +185,6 @@ elif st.session_state.step == "draft":
         st.subheader(f"⏱️ Now Picking: {get_team_name(active_id)}")
         act_c1, act_c2 = st.columns([1, 2])
         with act_c1:
-            # --- UPDATED PRO AI SIMULATION BLOCK ---
             if st.button("🤖 Sim to My Turn", use_container_width=True):
                 while len(st.session_state.draft_history) < total_expected_picks:
                     cp = len(st.session_state.draft_history) + 1
@@ -153,29 +195,22 @@ elif st.session_state.step == "draft":
                     av_sim = df[~df['full_name'].isin(tkn)].copy()
                     if av_sim.empty: break
                     
-                    # 1. AI calculates drop-off costs for the remaining pool
                     costs = {pos: 0 for pos in ['DEF', 'MID', 'RUC', 'FWD']}
                     for pos in costs:
                         pool = av_sim[av_sim['positions'].str.contains(pos, na=False)].sort_values('Power_Rating', ascending=False)
                         if len(pool) > (p['num_teams'] + 2): 
                             costs[pos] = pool.iloc[0]['Power_Rating'] - pool.iloc[p['num_teams']+2]['Power_Rating']
                     
-                    # 2. Get the simulated team's current roster counts
                     sim_pks = [d for d in st.session_state.draft_history if d['team'] == tn]
                     sim_counts = {pos: sum(1 for d in sim_pks if d['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
                     
-                    # 3. Find the best player AND ideal position (Fixes DPP logic)
                     best_player, best_pos, best_score = None, None, -9999.0
-                    
                     for _, r in av_sim.iterrows():
                         for po in r['positions'].split('/'):
                             if check_roster_limit(po, tn, p, st.session_state.draft_history):
-                                # Apply the exact VORP logic human recommendations use
                                 score = r['Power_Rating'] + (costs.get(po, 0) * 0.4)
-                                if sim_counts.get(po, 0) < p.get(po, 0):
-                                    score += 5.0 # High priority for unfilled field slots
-                                else:
-                                    score -= 25.0 # Penalty to prevent AI from hoarding bench players
+                                if sim_counts.get(po, 0) < p.get(po, 0): score += 5.0
+                                else: score -= 25.0
                                     
                                 if score > best_score:
                                     best_score = score
@@ -184,10 +219,8 @@ elif st.session_state.step == "draft":
                     
                     if best_player:
                         st.session_state.draft_history.append({"pick": cp, "team": tn, "player": best_player, "assigned_pos": best_pos})
-                    else: 
-                        break
+                    else: break
                 save_state(); st.rerun()
-            # --- END OF PRO AI SIMULATION BLOCK ---
 
         with act_c2:
             r_c1, r_c2, r_c3 = st.columns([2, 1, 1])
@@ -201,7 +234,6 @@ elif st.session_state.step == "draft":
                 st.session_state.draft_history.append({"pick": curr_p_num, "team": active_id, "player": sel, "assigned_pos": conf_pos})
                 save_state(); st.rerun()
 
-        # Recommendations UI Logic (Unchanged)
         if not avail_df.empty:
             active_pks = [d for d in st.session_state.draft_history if d['team'] == active_id]
             counts = {pos: sum(1 for d in active_pks if d['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
@@ -228,7 +260,12 @@ elif st.session_state.step == "draft":
             if not disp.empty and 'Opt_Score' in disp.columns:
                 disp = disp.sort_values('Opt_Score', ascending=False)
                 disp['Score'] = disp['Opt_Score'].apply(lambda x: "FULL" if x <= -500 else round(x, 1))
-                st.dataframe(disp[['full_name', 'positions', 'Score', 'Avg', 'Risk_Profile', 'gamesPlayed']].head(100), use_container_width=True, hide_index=True)
+                
+                # Format Expert Rank for Display
+                disp['Expert'] = disp['Expert_Rank'].apply(lambda x: f"Top {int(x)}" if x != 999 else "-")
+                
+                cols_to_show = ['full_name', 'positions', 'Score', 'Avg', 'Expert', 'Risk_Profile', 'gamesPlayed']
+                st.dataframe(disp[cols_to_show].head(100), use_container_width=True, hide_index=True)
             st.divider()
             cols = st.columns(4)
             for i, pos in enumerate(['DEF', 'MID', 'RUC', 'FWD']):
