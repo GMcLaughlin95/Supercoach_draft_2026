@@ -25,7 +25,6 @@ def load_state_logic():
             st.session_state.step = state.get("step", "home")
             st.session_state.draft_history = state.get("draft_history", [])
             st.session_state.team_names = state.get("team_names", {})
-            # Updated to new Draft Day defaults
             st.session_state.params = state.get("params", {
                 "num_teams": 10, "my_slot": 5, 
                 "DEF": 4, "MID": 5, "RUC": 1, "FWD": 4, "bench_size": 5, "draft_day_mode": False
@@ -50,7 +49,6 @@ if 'step' not in st.session_state:
         st.session_state.step = "home"
         st.session_state.draft_history = []
         st.session_state.team_names = {}
-        # Updated to new Draft Day defaults
         st.session_state.params = {
             "num_teams": 10, "my_slot": 5, 
             "DEF": 4, "MID": 5, "RUC": 1, "FWD": 4, "bench_size": 5, "draft_day_mode": False
@@ -106,33 +104,44 @@ def load_data():
         df['Injury_Return'] = df['full_name'].map(inj_dict).fillna('Healthy')
         df['Is_Breakout'] = df['full_name'].isin(brk_list)
 
-        # Classify Injury Severity
+        # --- UPDATED: Strict Injury Classification Parser ---
         def get_injury_severity(ret):
             r = str(ret).lower()
-            if 'healthy' in r: return 'None'
-            if 'season' in r or 'indefinite' in r or 'months' in r: return 'Long'
-            if 'weeks' in r or 'mid-season' in r or 'tbc' in r: return 'Mid'
-            return 'Short'
+            # 1. Ignore / Less than 2 weeks
+            if any(x in r for x in ['healthy', 'test', '1 week', 'opening round', 'round zero', 'rd 1']):
+                return 'None'
+            
+            # 2. Long Term (> Season Ending / Months)
+            if 'indefinite' in r or 'months' in r or ('season' in r and not any(x in r for x in ['early', 'mid'])):
+                return 'Long'
+                
+            # 3. Short Term (Strictly 2 to 4 weeks)
+            # Checks if string mentions 2, 3, or 4 weeks without mentioning 5, 6, 7+
+            if 'week' in r and any(c in r for c in ['2', '3', '4']) and not any(c in r for c in ['5', '6', '7', '8', '9', '10']):
+                return 'Short'
+            if 'post-round 2' in r:
+                return 'Short'
+                
+            # 4. Mid Term (Everything else: TBC, 4-6 weeks, Mid-Season, Early Season)
+            return 'Mid'
             
         df['Injury_Severity'] = df['Injury_Return'].apply(get_injury_severity)
         
-        # 5. Enhanced Power Rating calculation (With Injury Penalties)
+        # 5. Enhanced Power Rating calculation
         def calculate_custom_power(row):
             score = (row['Avg'] * 0.85) + (row['Last3_Avg'] * 0.05)
             if 'DEF' in row['positions']: score += (row['KickInAvg'] * 0.2)
             
-            # Expert Boosts
             exp_rank = row['Expert_Rank']
             if exp_rank <= 10: score += 12.0
             elif exp_rank <= 25: score += 8.0
             elif exp_rank <= 50: score += 4.0
             elif exp_rank <= 100: score += 1.5
                 
-            # Injury Penalties
             inj = row['Injury_Severity']
-            if inj == 'Long': score -= 1000.0   # Disqualify from drafting
-            elif inj == 'Mid': score -= 20.0    # Heavy penalty
-            elif inj == 'Short': score -= 5.0   # Minor penalty
+            if inj == 'Long': score -= 1000.0   
+            elif inj == 'Mid': score -= 20.0    
+            elif inj == 'Short': score -= 5.0   
 
             return round(score, 1)
 
@@ -182,7 +191,6 @@ elif st.session_state.step == "settings":
         f_r = st.number_input("FWD", value=st.session_state.params.get("FWD", 4))
     
     st.divider()
-    # NEW: DRAFT DAY MODE TOGGLE
     dd_mode = st.toggle("🏆 Enable Draft Day Mode (Disables AI Sim, Enables 'Undo Pick')", value=st.session_state.params.get("draft_day_mode", False))
     st.divider()
     
@@ -223,7 +231,6 @@ elif st.session_state.step == "draft":
     if is_complete:
         st.balloons()
         st.success("🎊 DRAFT COMPLETE! Final standings and rosters are ready.")
-        # Allow undo even after completion in Draft Day Mode
         if p.get("draft_day_mode", False):
             if st.button("↩️ Undo Last Pick (Mistake?)", use_container_width=True):
                 if st.session_state.draft_history:
@@ -235,7 +242,6 @@ elif st.session_state.step == "draft":
         act_c1, act_c2 = st.columns([1, 2])
         
         with act_c1:
-            # --- DRAFT DAY MODE LOGIC ---
             if p.get("draft_day_mode", False):
                 if st.button("↩️ Undo Last Pick", use_container_width=True):
                     if len(st.session_state.draft_history) > 0:
@@ -245,7 +251,6 @@ elif st.session_state.step == "draft":
                     else:
                         st.warning("No picks to undo.")
             else:
-                # Regular Simulation Logic
                 if st.button("🤖 Sim to My Turn", use_container_width=True):
                     while len(st.session_state.draft_history) < total_expected_picks:
                         cp = len(st.session_state.draft_history) + 1
@@ -270,7 +275,6 @@ elif st.session_state.step == "draft":
                             for po in r['positions'].split('/'):
                                 if check_roster_limit(po, tn, p, st.session_state.draft_history):
                                     score = r['Power_Rating'] + (costs.get(po, 0) * 0.4)
-                                    
                                     if sim_counts.get(po, 0) < p.get(po, 0): 
                                         score += 5.0 
                                     else: 
@@ -299,7 +303,6 @@ elif st.session_state.step == "draft":
                 st.session_state.draft_history.append({"pick": curr_p_num, "team": active_id, "player": sel, "assigned_pos": conf_pos})
                 save_state(); st.rerun()
 
-        # Recommendations Logic (unchanged features)
         if not avail_df.empty:
             active_pks = [d for d in st.session_state.draft_history if d['team'] == active_id]
             counts = {pos: sum(1 for d in active_pks if d['assigned_pos'] == pos) for pos in ['DEF', 'MID', 'RUC', 'FWD']}
@@ -336,7 +339,9 @@ elif st.session_state.step == "draft":
                 
                 disp['Expert'] = disp['Expert_Rank'].apply(lambda x: f"Top {int(x)}" if x != 999 else "-")
                 disp['Breakout'] = disp['Is_Breakout'].apply(lambda x: "🔥 Yes" if x else "-")
-                disp['Injury'] = disp['Injury_Severity'].apply(lambda x: "🚨 Avoid" if x == 'Long' else ("⚠️ Mid-Term" if x == 'Mid' else ("🩹 Short" if x == 'Short' else "✅")))
+                
+                # UI matches new logic
+                disp['Injury'] = disp['Injury_Severity'].apply(lambda x: "✅" if x == 'None' else ("🚨 Avoid" if x == 'Long' else ("⚠️ Mid-Term" if x == 'Mid' else "🩹 Short")))
                 
                 cols_to_show = ['full_name', 'positions', 'Score', 'Avg', 'Expert', 'Breakout', 'Injury']
                 st.dataframe(disp[cols_to_show].head(100), use_container_width=True, hide_index=True)
