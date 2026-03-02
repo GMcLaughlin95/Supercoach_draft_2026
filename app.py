@@ -61,17 +61,15 @@ def load_data():
         for col in cols_to_fix:
             df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
             
-        # 2. Load Expert Ratings & Parse Format
+        # 2. Load Expert Ratings
         expert_scores = {}
         try:
             exp_df = pd.read_csv('Draft Doctor SC Ratings.csv')
             data_rows = exp_df.iloc[1:].copy() 
             data_rows['Rank'] = pd.to_numeric(data_rows['Rank'], errors='coerce')
-            
             for _, r in data_rows.iterrows():
                 rank = r['Rank']
                 if pd.isna(rank): continue
-                
                 for col in data_rows.columns:
                     if col == 'Rank': continue
                     name = str(r[col]).strip()
@@ -82,24 +80,53 @@ def load_data():
         except Exception as e:
             st.warning(f"Note: Could not load 'Draft Doctor SC Ratings.csv'. {e}")
 
-        # Map to main dataframe
+        # 3. Load Injury Data
+        try:
+            inj_df = pd.read_csv('260302 AFL Injury List.csv')
+            inj_dict = dict(zip(inj_df['Player'].str.strip(), inj_df['Estimated Return'].str.strip()))
+        except Exception:
+            inj_dict = {}
+
+        # 4. Load Breakout Data
+        try:
+            brk_df = pd.read_csv('260302 AFL Breakout Players.csv')
+            brk_list = brk_df['Player'].str.strip().tolist()
+        except Exception:
+            brk_list = []
+
+        # Map external lists to main dataframe
         df['Expert_Rank'] = df['full_name'].map(expert_scores).fillna(999)
+        df['Injury_Return'] = df['full_name'].map(inj_dict).fillna('Healthy')
+        df['Is_Breakout'] = df['full_name'].isin(brk_list)
+
+        # Classify Injury Severity
+        def get_injury_severity(ret):
+            r = str(ret).lower()
+            if 'healthy' in r: return 'None'
+            if 'season' in r or 'indefinite' in r or 'months' in r: return 'Long'
+            if 'weeks' in r or 'mid-season' in r or 'tbc' in r: return 'Mid'
+            return 'Short'
+            
+        df['Injury_Severity'] = df['Injury_Return'].apply(get_injury_severity)
         
-        # 3. Enhanced Power Rating calculation
+        # 5. Enhanced Power Rating calculation (With Injury Penalties)
         def calculate_custom_power(row):
             score = (row['Avg'] * 0.85) + (row['Last3_Avg'] * 0.05)
             if 'DEF' in row['positions']: score += (row['KickInAvg'] * 0.2)
             
+            # Expert Boosts
             exp_rank = row['Expert_Rank']
-            if exp_rank <= 10:
-                score += 12.0
-            elif exp_rank <= 25:
-                score += 8.0
-            elif exp_rank <= 50:
-                score += 4.0
-            elif exp_rank <= 100:
-                score += 1.5
+            if exp_rank <= 10: score += 12.0
+            elif exp_rank <= 25: score += 8.0
+            elif exp_rank <= 50: score += 4.0
+            elif exp_rank <= 100: score += 1.5
                 
+            # Injury Penalties
+            inj = row['Injury_Severity']
+            if inj == 'Long': score -= 1000.0   # Disqualify from drafting
+            elif inj == 'Mid': score -= 20.0    # Heavy penalty
+            elif inj == 'Short': score -= 5.0   # Minor penalty
+
             return round(score, 1)
 
         df['Power_Rating'] = df.apply(calculate_custom_power, axis=1)
@@ -123,7 +150,6 @@ def get_team_name(tid):
 
 def check_roster_limit(chosen_pos, team_id, p, history_list):
     count = sum(1 for d in history_list if d['team'] == team_id and d.get('assigned_pos') == chosen_pos)
-    # FIX: Strictly caps RUC at whatever the user set in the settings
     if chosen_pos == "RUC":
         return count < p.get('RUC', 2)
     return count < (p.get(chosen_pos, 0) + (p.get('bench_size', 8) // 2 + 1))
@@ -145,7 +171,6 @@ elif st.session_state.step == "settings":
         st.write("**Target Field Roster**")
         d_r = st.number_input("DEF", value=st.session_state.params["DEF"])
         m_r = st.number_input("MID", value=st.session_state.params["MID"])
-        # FIX: Pull value from session state
         r_r = st.number_input("RUC", value=st.session_state.params.get("RUC", 2), max_value=2) 
         f_r = st.number_input("FWD", value=st.session_state.params["FWD"])
     st.divider()
@@ -153,7 +178,6 @@ elif st.session_state.step == "settings":
         existing = st.session_state.team_names.get(str(i), f"Team {i}")
         st.session_state.team_names[str(i)] = st.text_input(f"Slot {i} Name", value=existing)
     if st.button("Start Draft", type="primary", use_container_width=True):
-        # FIX: Save r_r properly instead of hardcoding 2
         st.session_state.params = {"num_teams": n_teams, "my_slot": m_slot, "DEF": d_r, "MID": m_r, "RUC": r_r, "FWD": f_r, "bench_size": b_size}
         st.session_state.step = "draft"; save_state(); st.rerun()
 
@@ -208,8 +232,13 @@ elif st.session_state.step == "draft":
                         for po in r['positions'].split('/'):
                             if check_roster_limit(po, tn, p, st.session_state.draft_history):
                                 score = r['Power_Rating'] + (costs.get(po, 0) * 0.4)
-                                if sim_counts.get(po, 0) < p.get(po, 0): score += 5.0
-                                else: score -= 25.0
+                                
+                                # Breakout/Bench AI Logic
+                                if sim_counts.get(po, 0) < p.get(po, 0): 
+                                    score += 5.0 # Prioritize empty field slots
+                                else: 
+                                    score -= 25.0 # Bench penalty
+                                    if r['Is_Breakout']: score += 40.0 # Massive priority boost for breakout bench players
                                     
                                 if score > best_score:
                                     best_score = score
@@ -240,7 +269,17 @@ elif st.session_state.step == "draft":
             for pos in costs:
                 pool = avail_df[avail_df['positions'].str.contains(pos, na=False)].sort_values('Power_Rating', ascending=False)
                 if len(pool) > (p['num_teams'] + 2): costs[pos] = pool.iloc[0]['Power_Rating'] - pool.iloc[p['num_teams']+2]['Power_Rating']
-            avail_df['Opt_Score'] = avail_df.apply(lambda row: max([row['Power_Rating'] + (costs.get(x, 0) * 0.4) + (5.0 if counts[x] < p[x] else -25.0) for x in row['positions'].split('/') if check_roster_limit(x, active_id, p, st.session_state.draft_history)] + [-999]), axis=1)
+            
+            # Breakout/Bench Recommendations Logic
+            avail_df['Opt_Score'] = avail_df.apply(
+                lambda row: max([
+                    row['Power_Rating'] + (costs.get(x, 0) * 0.4) + 
+                    (5.0 if counts.get(x, 0) < p.get(x, 0) else (-25.0 + (40.0 if row['Is_Breakout'] else 0.0))) 
+                    for x in row['positions'].split('/') 
+                    if check_roster_limit(x, active_id, p, st.session_state.draft_history)
+                ] + [-999]), axis=1
+            )
+            
             top_3 = avail_df[avail_df['Opt_Score'] > -500].sort_values('Opt_Score', ascending=False).head(3)
             rec_text = " / ".join([f"**{i+1}. {r['full_name']}** ({r['positions']})" for i, r in top_3.iterrows()])
             st.markdown(f"<p style='font-size: 0.85rem; color: #666;'>💡 Recommended: {rec_text}</p>", unsafe_allow_html=True)
@@ -260,9 +299,12 @@ elif st.session_state.step == "draft":
                 disp = disp.sort_values('Opt_Score', ascending=False)
                 disp['Score'] = disp['Opt_Score'].apply(lambda x: "FULL" if x <= -500 else round(x, 1))
                 
+                # UI Formatting for New Data
                 disp['Expert'] = disp['Expert_Rank'].apply(lambda x: f"Top {int(x)}" if x != 999 else "-")
+                disp['Breakout'] = disp['Is_Breakout'].apply(lambda x: "🔥 Yes" if x else "-")
+                disp['Injury'] = disp['Injury_Severity'].apply(lambda x: "🚨 Avoid" if x == 'Long' else ("⚠️ Mid-Term" if x == 'Mid' else ("🩹 Short" if x == 'Short' else "✅")))
                 
-                cols_to_show = ['full_name', 'positions', 'Score', 'Avg', 'Expert', 'Risk_Profile', 'gamesPlayed']
+                cols_to_show = ['full_name', 'positions', 'Score', 'Avg', 'Expert', 'Breakout', 'Injury']
                 st.dataframe(disp[cols_to_show].head(100), use_container_width=True, hide_index=True)
             st.divider()
             cols = st.columns(4)
