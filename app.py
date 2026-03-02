@@ -65,19 +65,17 @@ def load_data():
         expert_scores = {}
         try:
             exp_df = pd.read_csv('Draft Doctor SC Ratings.csv')
-            data_rows = exp_df.iloc[1:].copy() # Drop the first row of headers (Steve/Statesman)
+            data_rows = exp_df.iloc[1:].copy() 
             data_rows['Rank'] = pd.to_numeric(data_rows['Rank'], errors='coerce')
             
             for _, r in data_rows.iterrows():
                 rank = r['Rank']
                 if pd.isna(rank): continue
                 
-                # Check all columns for player names to capture both experts across all positions
                 for col in data_rows.columns:
                     if col == 'Rank': continue
                     name = str(r[col]).strip()
                     if name and name.lower() != 'nan':
-                        # Record their best (lowest) rank
                         current_best = expert_scores.get(name, 999)
                         if rank < current_best:
                             expert_scores[name] = rank
@@ -89,11 +87,9 @@ def load_data():
         
         # 3. Enhanced Power Rating calculation
         def calculate_custom_power(row):
-            # Base Stats (Weighted down slightly to make room for expert opinion)
             score = (row['Avg'] * 0.85) + (row['Last3_Avg'] * 0.05)
             if 'DEF' in row['positions']: score += (row['KickInAvg'] * 0.2)
             
-            # Incorporate Expert Consensus Bonuses
             exp_rank = row['Expert_Rank']
             if exp_rank <= 10:
                 score += 12.0
@@ -127,8 +123,9 @@ def get_team_name(tid):
 
 def check_roster_limit(chosen_pos, team_id, p, history_list):
     count = sum(1 for d in history_list if d['team'] == team_id and d.get('assigned_pos') == chosen_pos)
+    # FIX: Strictly caps RUC at whatever the user set in the settings
     if chosen_pos == "RUC":
-        return count < 2
+        return count < p.get('RUC', 2)
     return count < (p.get(chosen_pos, 0) + (p.get('bench_size', 8) // 2 + 1))
 
 # --- 3. PAGE ROUTING ---
@@ -148,14 +145,16 @@ elif st.session_state.step == "settings":
         st.write("**Target Field Roster**")
         d_r = st.number_input("DEF", value=st.session_state.params["DEF"])
         m_r = st.number_input("MID", value=st.session_state.params["MID"])
-        r_r = st.number_input("RUC", value=2, max_value=2) 
+        # FIX: Pull value from session state
+        r_r = st.number_input("RUC", value=st.session_state.params.get("RUC", 2), max_value=2) 
         f_r = st.number_input("FWD", value=st.session_state.params["FWD"])
     st.divider()
     for i in range(1, n_teams + 1):
         existing = st.session_state.team_names.get(str(i), f"Team {i}")
         st.session_state.team_names[str(i)] = st.text_input(f"Slot {i} Name", value=existing)
     if st.button("Start Draft", type="primary", use_container_width=True):
-        st.session_state.params = {"num_teams": n_teams, "my_slot": m_slot, "DEF": d_r, "MID": m_r, "RUC": 2, "FWD": f_r, "bench_size": b_size}
+        # FIX: Save r_r properly instead of hardcoding 2
+        st.session_state.params = {"num_teams": n_teams, "my_slot": m_slot, "DEF": d_r, "MID": m_r, "RUC": r_r, "FWD": f_r, "bench_size": b_size}
         st.session_state.step = "draft"; save_state(); st.rerun()
 
 elif st.session_state.step == "draft":
@@ -169,7 +168,7 @@ elif st.session_state.step == "draft":
         st.title("🛡️ Command Center")
         st.info(f"Slot: {p['my_slot']} | Teams: {p['num_teams']}")
         if not is_complete:
-            st.write(f"Pick: {len(st.session_state.draft_history) + 1} / {total_expected_picks}")
+            st.write(f"Pick Progress: {len(st.session_state.draft_history)} / {total_expected_picks}")
         if st.button("🚨 RESET DRAFT", use_container_width=True): reset_draft()
 
     curr_p_num = len(st.session_state.draft_history) + 1
@@ -261,7 +260,6 @@ elif st.session_state.step == "draft":
                 disp = disp.sort_values('Opt_Score', ascending=False)
                 disp['Score'] = disp['Opt_Score'].apply(lambda x: "FULL" if x <= -500 else round(x, 1))
                 
-                # Format Expert Rank for Display
                 disp['Expert'] = disp['Expert_Rank'].apply(lambda x: f"Top {int(x)}" if x != 999 else "-")
                 
                 cols_to_show = ['full_name', 'positions', 'Score', 'Avg', 'Expert', 'Risk_Profile', 'gamesPlayed']
